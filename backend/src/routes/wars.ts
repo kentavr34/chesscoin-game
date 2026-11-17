@@ -1,0 +1,1192 @@
+import { Router, Request, Response } from "express";
+import { z } from "zod";
+import { validate } from "@/middleware/validate"; // R4
+import { Chess } from "chess.js"; // BUG-10 fix
+import { nanoid } from "nanoid"; // BUG-10 fix
+import { getIo } from "@/lib/io";
+import { logger, logError } from "@/lib/logger";
+import { prisma } from "@/lib/prisma";
+import { authMiddleware } from "@/middleware/auth";
+import { updateBalance } from "@/services/economy";
+import { announceWarDeclared } from "@/services/telegramChannel";
+import { TransactionType, CountryWarStatus } from "@prisma/client";
+
+
+// ── R4: Zod схемы ─────────────────────────────────────────────────────────────
+const DeclareWarSchema = z.object({
+  defenderCountryId: z.string(),
+  duration: z.number().int().positive().optional(),
+});
+
+const ChallengeSchema = z.object({
+  opponentUserId: z.string().uuid("Invalid user ID"),
+});
+
+const DonateWarSchema = z.object({
+  amount: z.string().regex(/^\d+$/, "Amount must be a number"),
+});
+
+export const warsRouter = Router();
+
+// Стоимость вступления в страну (взнос идёт в казну страны, не возвращается)
+const COUNTRY_ENTRY_FEE = 10_000n;
+
+// ── Вспомогательная: Главнокомандующий страны ────────────────────────────────
+// Главком — игрок с наибольшим количеством рефералов в стране.
+// При равенстве — кто раньше вступил. (Раньше выбирался по warWins; Кенан:
+// «звание повышается из-за рефералов».)
+// B.4 MASTER_PLAN: главком сменяется автоматически при 7-дневной бездействии.
+// Сортировка по referralCount DESC, joinedAt ASC — но среди активных за 7 дней.
+// Если все неактивны — берём по тому же ranking из всего состава (fallback).
+const COMMANDER_INACTIVITY_MS = 7 * 24 * 60 * 60 * 1000;
+async function getCommander(countryId: string): Promise<string | null> {
+  const members = await prisma.countryMember.findMany({
+    where: { countryId, status: 'APPROVED' },
+    include: { user: { select: { id: true, referralCount: true, updatedAt: true } } },
+  });
+  if (members.length === 0) return null;
+  const cutoff = Date.now() - COMMANDER_INACTIVITY_MS;
+  const sortFn = (a: typeof members[0], b: typeof members[0]) => {
+    const refA = a.user.referralCount ?? 0;
+    const refB = b.user.referralCount ?? 0;
+    if (refA !== refB) return refB - refA;
+    return a.joinedAt.getTime() - b.joinedAt.getTime();
+  };
+  const active = members.filter(m => m.user.updatedAt.getTime() >= cutoff).sort(sortFn);
+  if (active.length > 0) return active[0]!.userId;
+  // fallback — все неактивны, оставляем «старого» по ranking
+  members.sort(sortFn);
+  return members[0]!.userId;
+}
+
+// Подсчёт побед игрока в текущей войне страны (если она идёт)
+async function getWarWinsByUser(warId: string): Promise<Map<string, number>> {
+  const battles = await prisma.warBattle.findMany({
+    where: { warId, status: 'FINISHED' },
+    select: { winnerId: true },
+  });
+  const map = new Map<string, number>();
+  for (const b of battles) {
+    if (b.winnerId) map.set(b.winnerId, (map.get(b.winnerId) ?? 0) + 1);
+  }
+  return map;
+}
+
+// ── Форматирование страны ────────────────────────────────────────────────────
+function fmtCountry(c: Record<string,unknown> & { treasury?: bigint; _count?: { members?: number }; members?: unknown[] }, myMembership: Record<string,unknown> | null, commanderId: string | null) {
+  return {
+    id: c.id,
+    code: c.code,
+    nameRu: c.nameRu,
+    nameEn: c.nameEn,
+    flag: c.flag,
+    treasury: (c.treasury as bigint | undefined)?.toString() ?? "0",
+    wins: c.wins,
+    losses: c.losses,
+    maxMembers: c.maxMembers,
+    memberCount: (c._count as Record<string,unknown> | undefined)?.members as number ?? 0,
+    commanderId,
+    myMembership: myMembership ?? null,
+    activeWar: null, // заполняется отдельно при необходимости
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /wars/countries — список всех стран
+// ─────────────────────────────────────────────────────────────────────────────
+warsRouter.get("/countries", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const sort = req.query.sort as string; // "wins" | "alpha"
+
+    const countries = await prisma.country.findMany({
+      include: {
+        _count: { select: { members: true } },
+        members: { where: { userId }, select: { id: true, warWins: true, warLosses: true, joinedAt: true } },
+      },
+      orderBy: sort === "alpha"
+        ? [{ nameRu: "asc" }]
+        : [{ wins: "desc" }, { nameRu: "asc" }],
+    });
+
+    const result = await Promise.all(
+      countries.map(async (c) => {
+        const commanderId = await getCommander(c.id);
+        return fmtCountry(c, c.members[0] ?? null, commanderId);
+      })
+    );
+
+    res.json({ countries: result });
+  } catch (e: unknown) {
+    logError("[Wars]", e);
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /wars/countries/:id — страница страны + бойцы
+// ─────────────────────────────────────────────────────────────────────────────
+warsRouter.get("/countries/:id", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { id } = req.params;
+
+    const country = await prisma.country.findUnique({
+      where: { id },
+      include: { _count: { select: { members: true } } },
+    });
+    if (!country) return res.status(404).json({ error: "Country not found" });
+
+    // Активная война (нужно знать ДО сортировки членов)
+    const activeWar = await prisma.countryWar.findFirst({
+      where: {
+        status: "IN_PROGRESS",
+        OR: [{ attackerCountryId: id }, { defenderCountryId: id }],
+      },
+      include: {
+        attackerCountry: { select: { id: true, code: true, nameRu: true, nameEn: true, flag: true } },
+        defenderCountry: { select: { id: true, code: true, nameRu: true, nameEn: true, flag: true } },
+      },
+    });
+
+    // Бойцы
+    const members = await prisma.countryMember.findMany({
+      where: { countryId: id },
+      include: {
+        user: {
+          select: { id: true, firstName: true, lastName: true, username: true, elo: true, league: true, avatar: true, avatarType: true, avatarGradient: true, jarvisLevel: true, isMonthlyChampion: true, monthlyChampionType: true, referralCount: true },
+        },
+      },
+    });
+
+    // Главком — игрок с max referralCount (используется для бейджа)
+    const sortedByRefs = [...members].sort((a, b) => {
+      const refA = a.user.referralCount ?? 0;
+      const refB = b.user.referralCount ?? 0;
+      if (refA !== refB) return refB - refA;
+      return a.joinedAt.getTime() - b.joinedAt.getTime();
+    });
+    const commanderId = sortedByRefs[0]?.userId ?? null;
+
+    // Сортировка списка бойцов:
+    // - есть активная война: сначала те, кто принёс больше побед В ЭТОЙ войне,
+    //   при равенстве — по wins-за-всё-время, затем по алфавиту
+    // - нет активной войны: сначала по победам-за-всё-время, при равенстве — по алфавиту;
+    //   query ?sort=alpha — чисто алфавитный порядок
+    const wantAlpha = (req.query.sort as string) === 'alpha';
+    let winsInActiveWar: Map<string, number> = new Map();
+    if (activeWar) {
+      winsInActiveWar = await getWarWinsByUser(activeWar.id);
+    }
+
+    // Порядок списка бойцов задан Кенаном (30.07.2026): чемпион, затем
+    // главнокомандующий, затем три лучших по победам за страну, затем все
+    // остальные. Внутри каждой ступени — прежний порядок: кто больше принёс
+    // в текущей войне, потом по победам за всё время, потом по алфавиту.
+    const topByWins = [...members]
+      .sort((a, b) => b.warWins - a.warWins || a.joinedAt.getTime() - b.joinedAt.getTime())
+      .filter(m => m.warWins > 0)
+      .slice(0, 3)
+      .map(m => m.userId);
+    const topByWinsSet = new Set(topByWins);
+
+    const tierOf = (m: typeof members[0]) => {
+      if (m.user.isMonthlyChampion) return 0;   // чемпион
+      if (m.userId === commanderId) return 1;   // главком
+      if (topByWinsSet.has(m.userId)) return 2; // три лучших по победам
+      return 3;                                 // остальные
+    };
+
+    const cmp = (a: typeof members[0], b: typeof members[0]) => {
+      // Алфавитный режим просит именно алфавит — ступени в нём не мешаем.
+      if (!wantAlpha) {
+        const ta = tierOf(a), tb = tierOf(b);
+        if (ta !== tb) return ta - tb;
+      }
+      if (activeWar) {
+        const wa = winsInActiveWar.get(a.userId) ?? 0;
+        const wb = winsInActiveWar.get(b.userId) ?? 0;
+        if (wa !== wb) return wb - wa;
+      }
+      if (!wantAlpha) {
+        if (a.warWins !== b.warWins) return b.warWins - a.warWins;
+      }
+      // alpha (или ничья по победам) — по имени
+      return (a.user.firstName ?? '').localeCompare(b.user.firstName ?? '', 'ru');
+    };
+    const sortedMembers = [...members].sort(cmp);
+
+    const myMembership = sortedMembers.find((m) => m.userId === userId) ?? null;
+
+    const fmtMembers = sortedMembers.map((m) => ({
+      id: m.id,
+      userId: m.userId,
+      warWins: m.warWins,
+      warLosses: m.warLosses,
+      currentWarWins: activeWar ? (winsInActiveWar.get(m.userId) ?? 0) : 0,
+      contribution: m.contribution.toString(),
+      referralCount: m.user.referralCount ?? 0,
+      joinedAt: m.joinedAt,
+      isCommander: m.userId === commanderId,
+      // Чем боец выделен в списке: 0 чемпион, 1 главком, 2 один из трёх
+      // лучших по победам за страну, 3 остальные.
+      tier: tierOf(m),
+      isChampion: !!m.user.isMonthlyChampion,
+      isTopByWins: topByWinsSet.has(m.userId),
+      user: m.user,
+    }));
+
+    res.json({
+      country: {
+        ...fmtCountry(country, myMembership ? { warWins: myMembership.warWins, warLosses: myMembership.warLosses, joinedAt: myMembership.joinedAt, contribution: myMembership.contribution.toString(), status: myMembership.status } : null, commanderId),
+        activeWar,
+        entryFee: COUNTRY_ENTRY_FEE.toString(),
+      },
+      members: fmtMembers,
+      isCommander: commanderId === userId,
+    });
+  } catch (e: unknown) {
+    logError("[Wars]", e);
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /wars/my-country — моя страна + статус бойца
+// ─────────────────────────────────────────────────────────────────────────────
+warsRouter.get("/my-country", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+
+    const membership = await prisma.countryMember.findUnique({
+      where: { userId },
+      include: {
+        country: { include: { _count: { select: { members: true } } } },
+      },
+    });
+
+    if (!membership) return res.json({ country: null, membership: null, isCommander: false });
+
+    const commanderId = await getCommander(membership.countryId);
+    const isCommander = commanderId === userId;
+
+    const activeWar = await prisma.countryWar.findFirst({
+      where: {
+        status: "IN_PROGRESS",
+        OR: [
+          { attackerCountryId: membership.countryId },
+          { defenderCountryId: membership.countryId },
+        ],
+      },
+      include: {
+        attackerCountry: { select: { id: true, code: true, nameRu: true, nameEn: true, flag: true } },
+        defenderCountry: { select: { id: true, code: true, nameRu: true, nameEn: true, flag: true } },
+        _count: { select: { battles: true } },
+      },
+    });
+
+    res.json({
+      country: fmtCountry(membership.country, null, commanderId),
+      membership: {
+        id: membership.id,
+        warWins: membership.warWins,
+        warLosses: membership.warLosses,
+        joinedAt: membership.joinedAt,
+      },
+      isCommander,
+      activeWar,
+    });
+  } catch (e: unknown) {
+    logError("[Wars]", e);
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /wars/countries/:id/join — вступить в страну
+// ─────────────────────────────────────────────────────────────────────────────
+warsRouter.post("/countries/:id/join", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { id } = req.params;
+
+    const country = await prisma.country.findUnique({ where: { id } });
+    if (!country) return res.status(404).json({ error: "Country not found" });
+
+    // B.3: лимит maxMembers считаем только по APPROVED (PENDING не занимают слот)
+    const approvedCount = await prisma.countryMember.count({
+      where: { countryId: id, status: 'APPROVED' },
+    });
+    if (approvedCount >= country.maxMembers) {
+      return res.status(400).json({ error: "COUNTRY_FULL" });
+    }
+
+    const existing = await prisma.countryMember.findUnique({ where: { userId } });
+    if (existing) {
+      if (existing.countryId === id) return res.status(400).json({ error: "ALREADY_IN_COUNTRY" });
+      const activeWar = await prisma.countryWar.findFirst({
+        where: {
+          status: "IN_PROGRESS",
+          OR: [{ attackerCountryId: existing.countryId }, { defenderCountryId: existing.countryId }],
+        },
+      });
+      if (activeWar) return res.status(400).json({ error: "WAR_IN_PROGRESS" });
+      // Трансфер: старый взнос остаётся в казне той страны
+      await prisma.countryMember.delete({ where: { userId } });
+    }
+
+    // Проверка баланса заранее (взнос списывается при approve)
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { balance: true } });
+    if (user.balance < COUNTRY_ENTRY_FEE) {
+      return res.status(400).json({ error: "INSUFFICIENT_BALANCE", required: COUNTRY_ENTRY_FEE.toString() });
+    }
+
+    // PR-3 (Кенан 2026-05-17): первый зашедший в страну (нет ни одного APPROVED)
+    // → автоматически APPROVED и по факту становится главкомом (getCommander
+    // отдаст его, т.к. он единственный APPROVED). Иначе PENDING — ждёт одобрения.
+    // Используем approvedCount, посчитанный выше (для проверки maxMembers).
+    const isFirstFighter = approvedCount === 0;
+
+    let member;
+    if (isFirstFighter) {
+      // Сразу списываем взнос: ты подтверждаешь вступление сам себе.
+      member = await prisma.$transaction(async (tx) => {
+        const m = await tx.countryMember.create({
+          data: {
+            countryId: id, userId,
+            contribution: COUNTRY_ENTRY_FEE,
+            status: 'APPROVED',
+          },
+        });
+        await updateBalance(userId, -COUNTRY_ENTRY_FEE, TransactionType.CLAN_CONTRIBUTION,
+          { countryId: id, reason: 'country_join_first_commander' }, { tx });
+        await tx.country.update({
+          where: { id },
+          data: { treasury: { increment: COUNTRY_ENTRY_FEE } },
+        });
+        return m;
+      });
+      // PR-3 (Кенан 2026-05-18): бейдж «Главнокомандующий».
+      try {
+        const { awardCommanderAchievement } = await import("@/services/achievements");
+        await awardCommanderAchievement(userId, id);
+      } catch (e) { /* non-fatal */ }
+      // Уведомление «Ты главнокомандующий».
+      try {
+        getIo().emit(`user:${userId}`, {
+          type: 'country:commander-assigned',
+          countryId: id,
+          message: 'Ты теперь главнокомандующий — собирай бойцов и принимай заявки',
+        });
+        const user = await prisma.user.findUnique({ where: { id: userId }, select: { telegramId: true, firstName: true } });
+        if (user?.telegramId) {
+          await prisma.adminNotification.create({
+            data: {
+              type: 'COUNTRY_COMMANDER_ASSIGNED',
+              payload: {
+                telegramId: user.telegramId,
+                name: user.firstName,
+                countryId: id,
+              },
+            },
+          }).catch(() => {});
+        }
+      } catch (e) { logError('[Wars/commander-notify]', e); }
+    } else {
+      // B.3 MASTER_PLAN: вступление = заявка PENDING. Взнос НЕ списан до
+      // approve главкомом. При reject — membership удаляется без списания.
+      member = await prisma.countryMember.create({
+        data: { countryId: id, userId, contribution: 0n, status: 'PENDING' },
+      });
+      // B.3 push: уведомляем главкома страны о новой заявке.
+      try {
+        const commanderId = await getCommander(id);
+        if (commanderId && commanderId !== userId) {
+          const applicant = await prisma.user.findUnique({
+            where: { id: userId },
+            select: { firstName: true, elo: true, referralCount: true },
+          });
+          getIo().emit(`user:${commanderId}`, {
+            type: 'country:join-request',
+            countryId: id,
+            memberId: member.id,
+            applicant: applicant ?? null,
+          });
+        }
+      } catch (e) { logError('[Wars/join-notify]', e); }
+    }
+
+    res.json({
+      success: true,
+      pending: !isFirstFighter,
+      isCommander: isFirstFighter,
+      entryFee: COUNTRY_ENTRY_FEE.toString(),
+      membership: {
+        id: member.id, warWins: 0, warLosses: 0,
+        contribution: member.contribution.toString(),
+        joinedAt: member.joinedAt,
+        status: member.status,
+      },
+    });
+  } catch (e: unknown) {
+    logError("[Wars]", e);
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// B.3 MASTER_PLAN — approve/reject заявок на вступление главкомом.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /wars/pending — список PENDING-заявок в моей стране (только для ГК).
+warsRouter.get("/pending", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const myMembership = await prisma.countryMember.findUnique({
+      where: { userId },
+      select: { countryId: true, status: true },
+    });
+    if (!myMembership || myMembership.status !== 'APPROVED') {
+      return res.json({ pending: [] });
+    }
+    const commanderId = await getCommander(myMembership.countryId);
+    if (commanderId !== userId) return res.json({ pending: [] });
+
+    const pending = await prisma.countryMember.findMany({
+      where: { countryId: myMembership.countryId, status: 'PENDING' },
+      orderBy: { joinedAt: 'asc' },
+      include: { user: { select: { id: true, firstName: true, username: true, avatar: true, elo: true, referralCount: true } } },
+    });
+    res.json({ pending: pending.map(p => ({
+      id: p.id, joinedAt: p.joinedAt,
+      user: p.user,
+    })) });
+  } catch (e: unknown) {
+    logError("[Wars/pending]", e);
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// POST /wars/pending/:memberId/approve — главком одобряет заявку.
+// Списывает COUNTRY_ENTRY_FEE с заявителя в казну страны, status → APPROVED.
+warsRouter.post("/pending/:memberId/approve", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { memberId } = req.params;
+    const target = await prisma.countryMember.findUnique({ where: { id: memberId } });
+    if (!target || target.status !== 'PENDING') {
+      return res.status(404).json({ error: "PENDING_NOT_FOUND" });
+    }
+    const commanderId = await getCommander(target.countryId);
+    if (commanderId !== userId) return res.status(403).json({ error: "NOT_COMMANDER" });
+
+    const applicant = await prisma.user.findUnique({ where: { id: target.userId }, select: { balance: true } });
+    if (!applicant || applicant.balance < COUNTRY_ENTRY_FEE) {
+      // Заявитель потратил баланс — отклоняем (удаляем заявку).
+      await prisma.countryMember.delete({ where: { id: memberId } });
+      return res.status(400).json({ error: "APPLICANT_INSUFFICIENT_BALANCE", removed: true });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await updateBalance(target.userId, -COUNTRY_ENTRY_FEE, TransactionType.COUNTRY_ENTRY, {
+        countryId: target.countryId, reason: 'country_join_approved', approvedBy: userId,
+      }, { tx });
+      await tx.country.update({
+        where: { id: target.countryId },
+        data: { treasury: { increment: COUNTRY_ENTRY_FEE } },
+      });
+      await tx.countryMember.update({
+        where: { id: memberId },
+        data: { status: 'APPROVED', contribution: COUNTRY_ENTRY_FEE },
+      });
+    });
+    try {
+      getIo().emit(`user:${target.userId}`, { type: 'country:join-approved', countryId: target.countryId });
+    } catch (e) { logError('[Wars/approve-notify]', e); }
+    res.json({ success: true, approved: memberId });
+  } catch (e: unknown) {
+    logError("[Wars/approve]", e);
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// POST /wars/pending/:memberId/reject — главком отклоняет заявку.
+// Membership удаляется. Никаких списаний (взнос не был списан).
+warsRouter.post("/pending/:memberId/reject", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { memberId } = req.params;
+    const target = await prisma.countryMember.findUnique({ where: { id: memberId } });
+    if (!target || target.status !== 'PENDING') {
+      return res.status(404).json({ error: "PENDING_NOT_FOUND" });
+    }
+    const commanderId = await getCommander(target.countryId);
+    if (commanderId !== userId) return res.status(403).json({ error: "NOT_COMMANDER" });
+
+    await prisma.countryMember.delete({ where: { id: memberId } });
+    try {
+      getIo().emit(`user:${target.userId}`, { type: 'country:join-rejected', countryId: target.countryId });
+    } catch (e) { logError('[Wars/reject-notify]', e); }
+    res.json({ success: true, rejected: memberId });
+  } catch (e: unknown) {
+    logError("[Wars/reject]", e);
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /wars/leave — покинуть страну
+// ─────────────────────────────────────────────────────────────────────────────
+warsRouter.post("/leave", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+
+    const existing = await prisma.countryMember.findUnique({ where: { userId } });
+    if (!existing) return res.status(400).json({ error: "Not in any country" });
+
+    // Нельзя покинуть страну во время активной войны
+    const activeWar = await prisma.countryWar.findFirst({
+      where: {
+        status: "IN_PROGRESS",
+        OR: [{ attackerCountryId: existing.countryId }, { defenderCountryId: existing.countryId }],
+      },
+    });
+    if (activeWar) return res.status(400).json({ error: "Cannot leave during active war" });
+
+    await prisma.countryMember.delete({ where: { userId } });
+
+    res.json({ success: true });
+  } catch (e: unknown) {
+    logError("[Wars]", e);
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /wars/intro-seen — отметить просмотр вводного окна
+// ─────────────────────────────────────────────────────────────────────────────
+warsRouter.post("/intro-seen", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    await prisma.user.update({ where: { id: userId }, data: { hasSeenWarsIntro: true } });
+    res.json({ success: true });
+  } catch (e: unknown) {
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /wars/active — активные войны (для всех)
+// ─────────────────────────────────────────────────────────────────────────────
+warsRouter.get("/active", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const wars = await prisma.countryWar.findMany({
+      where: { status: "IN_PROGRESS" },
+      orderBy: { startedAt: "desc" },
+      include: {
+        attackerCountry: { select: { id: true, code: true, nameRu: true, nameEn: true, flag: true, wins: true } },
+        defenderCountry: { select: { id: true, code: true, nameRu: true, nameEn: true, flag: true, wins: true } },
+        _count: { select: { battles: true } },
+      },
+    });
+
+    res.json({ wars: wars.map(formatWar) });
+  } catch (e: unknown) {
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /wars/countries/:id/rivals — счёт против каждой другой страны
+//
+// Кенан 30.07.2026: «счётчик побед у каждой страны над каждой другой стороной».
+// Отдельного поля под это нет и не нужно — всё считается из завершённых войн
+// и сыгранных в них партий, поэтому цифры не могут разойтись с историей.
+// ─────────────────────────────────────────────────────────────────────────────
+warsRouter.get("/countries/:id/rivals", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id;
+
+    const wars = await prisma.countryWar.findMany({
+      where: {
+        status: "FINISHED",
+        OR: [{ attackerCountryId: id }, { defenderCountryId: id }],
+      },
+      select: {
+        id: true, attackerCountryId: true, defenderCountryId: true,
+        attackerWins: true, defenderWins: true, finishedAt: true,
+        attackerCountry: { select: { id: true, code: true, nameRu: true, nameEn: true, flag: true } },
+        defenderCountry: { select: { id: true, code: true, nameRu: true, nameEn: true, flag: true } },
+      },
+    });
+
+    type Row = {
+      country: { id: string; code: string; nameRu: string; nameEn: string; flag: string };
+      warsWon: number; warsLost: number; warsDraw: number;
+      battlesWon: number; battlesLost: number;
+      lastAt: Date | null;
+    };
+    const byRival = new Map<string, Row>();
+
+    for (const w of wars) {
+      const iAmAttacker = w.attackerCountryId === id;
+      const rival = iAmAttacker ? w.defenderCountry : w.attackerCountry;
+      if (!rival) continue;
+      const myWins = iAmAttacker ? w.attackerWins : w.defenderWins;
+      const foeWins = iAmAttacker ? w.defenderWins : w.attackerWins;
+
+      const row = byRival.get(rival.id) ?? {
+        country: rival, warsWon: 0, warsLost: 0, warsDraw: 0,
+        battlesWon: 0, battlesLost: 0, lastAt: null,
+      };
+      row.battlesWon += myWins;
+      row.battlesLost += foeWins;
+      if (myWins > foeWins) row.warsWon += 1;
+      else if (myWins < foeWins) row.warsLost += 1;
+      else row.warsDraw += 1;
+      if (w.finishedAt && (!row.lastAt || w.finishedAt > row.lastAt)) row.lastAt = w.finishedAt;
+      byRival.set(rival.id, row);
+    }
+
+    // Сначала те, с кем воевали чаще, потом по названию.
+    const rivals = [...byRival.values()].sort((a, b) => {
+      const ta = a.warsWon + a.warsLost + a.warsDraw;
+      const tb = b.warsWon + b.warsLost + b.warsDraw;
+      if (ta !== tb) return tb - ta;
+      return a.country.nameRu.localeCompare(b.country.nameRu, "ru");
+    });
+
+    res.json({
+      rivals,
+      total: {
+        warsWon: rivals.reduce((n, r) => n + r.warsWon, 0),
+        warsLost: rivals.reduce((n, r) => n + r.warsLost, 0),
+        battlesWon: rivals.reduce((n, r) => n + r.battlesWon, 0),
+        battlesLost: rivals.reduce((n, r) => n + r.battlesLost, 0),
+      },
+    });
+  } catch (e: unknown) {
+    logError("[Wars/rivals]", e);
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// GET /wars/history — завершённые войны
+// ─────────────────────────────────────────────────────────────────────────────
+warsRouter.get("/history", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const limit = parseInt(req.query.limit as string) || 20;
+    const offset = parseInt(req.query.offset as string) || 0;
+
+    const wars = await prisma.countryWar.findMany({
+      where: { status: "FINISHED" },
+      orderBy: { finishedAt: "desc" },
+      take: limit,
+      skip: offset,
+      include: {
+        attackerCountry: { select: { id: true, code: true, nameRu: true, nameEn: true, flag: true } },
+        defenderCountry: { select: { id: true, code: true, nameRu: true, nameEn: true, flag: true } },
+        _count: { select: { battles: true } },
+      },
+    });
+
+    res.json({ wars: wars.map(formatWar) });
+  } catch (e: unknown) {
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX #3: Статические маршруты /my-saved-games и /games/:id перенесены СЮДА —
+// до /:warId, иначе Express перехватывал их как warId = "my-saved-games"
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /wars/my-saved-games — мои сохранённые партии
+warsRouter.get("/my-saved-games", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+
+    const saved = await prisma.savedGame.findMany({
+      where: { userId },
+      orderBy: { savedAt: "desc" },
+      include: {
+        session: {
+          select: {
+            id: true, pgn: true, fen: true, status: true, type: true,
+            finishedAt: true, createdAt: true,
+            sides: {
+              include: {
+                player: { select: { id: true, firstName: true, lastName: true, avatar: true, avatarType: true, avatarGradient: true, elo: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    res.json({ savedGames: saved });
+  } catch (e: unknown) {
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// POST /wars/games/:sessionId/save — сохранить партию в профиль
+warsRouter.post("/games/:sessionId/save", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { sessionId } = req.params;
+
+    const session = await prisma.session.findUnique({ where: { id: sessionId } });
+    if (!session) return res.status(404).json({ error: "Session not found" });
+
+    const saved = await prisma.savedGame.upsert({
+      where: { userId_sessionId: { userId, sessionId } },
+      update: {},
+      create: { userId, sessionId },
+    });
+
+    res.json({ success: true, savedGame: { id: saved.id, savedAt: saved.savedAt } });
+  } catch (e: unknown) {
+    logError("[Wars]", e);
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// DELETE /wars/games/:sessionId/save — убрать из сохранённых
+warsRouter.delete("/games/:sessionId/save", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { sessionId } = req.params;
+
+    await prisma.savedGame.deleteMany({ where: { userId, sessionId } });
+    res.json({ success: true });
+  } catch (e: unknown) {
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /wars/:warId — детали войны + партии
+// ─────────────────────────────────────────────────────────────────────────────
+warsRouter.get("/:warId", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { warId } = req.params;
+
+    const war = await prisma.countryWar.findUnique({
+      where: { id: warId },
+      include: {
+        attackerCountry: { select: { id: true, code: true, nameRu: true, nameEn: true, flag: true } },
+        defenderCountry: { select: { id: true, code: true, nameRu: true, nameEn: true, flag: true } },
+        battles: {
+          orderBy: { createdAt: "desc" },
+          include: {
+            session: {
+              select: {
+                id: true, pgn: true, fen: true, status: true, finishedAt: true,
+                sides: { include: { player: { select: { id: true, firstName: true, lastName: true, avatar: true, avatarType: true, avatarGradient: true, elo: true } } } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!war) return res.status(404).json({ error: "War not found" });
+
+    // W3: Добавляем количество зрителей для каждого активного батла
+    // spectatorRooms хранится в socket.ts — получаем через io
+    const battlesWithSpectators = (war as WarRecord & { battles?: Array<Record<string,unknown> & { sessionId?: string }> }).battles?.map((b) => {
+      let spectatorCount = 0;
+      try {
+        const room = getIo().sockets.adapter.rooms?.get(`spectate:${b.sessionId}`);
+        spectatorCount = room?.size ?? 0;
+      } catch {}
+      return { ...b, spectatorCount };
+    });
+
+    res.json({ war: { ...formatWar(war), battles: battlesWithSpectators } });
+  } catch (e: unknown) {
+    logError("[Wars]", e);
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /wars/declare — объявить войну (только Главнокомандующий)
+// ─────────────────────────────────────────────────────────────────────────────
+warsRouter.post("/declare", authMiddleware, validate(DeclareWarSchema), async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { defenderCountryId, duration } = req.body; // R4: validated
+
+    if (!defenderCountryId || !duration) return res.status(400).json({ error: "defenderCountryId and duration required" });
+
+    // Проверить что пользователь в стране и является Главнокомандующим
+    const membership = await prisma.countryMember.findUnique({ where: { userId } });
+    if (!membership) return res.status(403).json({ error: "You are not in any country" });
+
+    const commanderId = await getCommander(membership.countryId);
+    if (commanderId !== userId) return res.status(403).json({ error: "Only the Commander-in-Chief can declare war" });
+
+    if (membership.countryId === defenderCountryId) return res.status(400).json({ error: "Cannot declare war on your own country" });
+
+    // Проверить — нет ли уже активной войны у атакующей страны
+    const existingWar = await prisma.countryWar.findFirst({
+      where: {
+        status: "IN_PROGRESS",
+        OR: [
+          { attackerCountryId: membership.countryId },
+          { defenderCountryId: membership.countryId },
+        ],
+      },
+    });
+    if (existingWar) return res.status(400).json({ error: "Your country is already at war" });
+
+    // Проверить — нет ли уже активной войны у защищающейся страны
+    const defenderWar = await prisma.countryWar.findFirst({
+      where: {
+        status: "IN_PROGRESS",
+        OR: [
+          { attackerCountryId: defenderCountryId },
+          { defenderCountryId: defenderCountryId },
+        ],
+      },
+    });
+    if (defenderWar) return res.status(400).json({ error: "Defender country is already at war" });
+
+    const defenderCountry = await prisma.country.findUnique({ where: { id: defenderCountryId } });
+    if (!defenderCountry) return res.status(404).json({ error: "Defender country not found" });
+
+    const endAt = new Date(Date.now() + duration * 1000);
+
+    // PR-3: сброс warWinsCurrent у всех бойцов обеих стран — счётчик побед
+    // в новой войне начинается с нуля. На основе этого поля распределяется
+    // казна войны (топ-1/2/3 + пропорция остальных).
+    await prisma.countryMember.updateMany({
+      where: { countryId: { in: [membership.countryId, defenderCountryId] } },
+      data: { warWinsCurrent: 0 },
+    });
+
+    const war = await prisma.countryWar.create({
+      data: {
+        attackerCountryId: membership.countryId,
+        defenderCountryId,
+        duration,
+        endAt,
+        declaredByUserId: userId,
+        prizePerWin: 100n, // FIX #9: BigInt — схема определяет поле как BigInt
+      },
+      include: {
+        attackerCountry: { select: { id: true, code: true, nameRu: true, nameEn: true, flag: true } },
+        defenderCountry: { select: { id: true, code: true, nameRu: true, nameEn: true, flag: true } },
+      },
+    });
+
+    // Уведомить Главнокомандующего страны-противника
+    const defenderCommanderId = await getCommander(defenderCountryId);
+    if (defenderCommanderId) {
+      try {
+        getIo().emit(`user:${defenderCommanderId}`, {
+          type: "war:declared",
+          war: formatWar(war),
+          message: `${war.attackerCountry.nameRu} объявила войну вашей стране!`,
+        });
+      } catch {}
+      // Bot notification для Главнокомандующего защитников
+      const defenderCommander = await prisma.user.findUnique({ where: { id: defenderCommanderId }, select: { telegramId: true, firstName: true } });
+      if (defenderCommander?.telegramId) {
+        await prisma.adminNotification.create({
+          data: {
+            type: "WAR_DECLARED",
+            payload: {
+              telegramId: defenderCommander.telegramId,
+              attackerName: war.attackerCountry.nameRu,
+              attackerFlag: war.attackerCountry.flag,
+              defenderName: war.defenderCountry.nameRu,
+              defenderFlag: war.defenderCountry.flag,
+              endAt: war.endAt.toISOString(),
+            },
+          },
+        }).catch(() => {});
+      }
+    }
+
+    // Уведомить всех бойцов атакующей страны
+    const attackerMembers = await prisma.countryMember.findMany({
+      where: { countryId: membership.countryId },
+      select: { userId: true },
+    });
+    for (const m of attackerMembers) {
+      try {
+        getIo().emit(`user:${m.userId}`, {
+          type: "war:started",
+          war: formatWar(war),
+        });
+      } catch {}
+    }
+
+    // Уведомить всех бойцов защищающейся страны через бота
+    const defenderMembers = await prisma.countryMember.findMany({
+      where: { countryId: defenderCountryId },
+      select: { userId: true },
+    });
+    const allWarMembers = [...attackerMembers, ...defenderMembers];
+    for (const m of allWarMembers) {
+      const member = await prisma.user.findUnique({ where: { id: m.userId }, select: { telegramId: true } });
+      if (member?.telegramId) {
+        await prisma.adminNotification.create({
+          data: {
+            type: "WAR_STARTED",
+            payload: {
+              telegramId: member.telegramId,
+              attackerName: war.attackerCountry.nameRu,
+              attackerFlag: war.attackerCountry.flag,
+              defenderName: war.defenderCountry.nameRu,
+              defenderFlag: war.defenderCountry.flag,
+              endAt: war.endAt.toISOString(),
+            },
+          },
+        }).catch(() => {});
+      }
+    }
+
+    // Объявление в канал: кто кому объявил, сколько в кассе, как делятся деньги.
+    // Не блокирует ответ — война не должна падать из-за Telegram.
+    void (async () => {
+      const [atk, def] = await Promise.all([
+        prisma.country.findUnique({ where: { id: membership.countryId }, select: { treasury: true } }),
+        prisma.country.findUnique({ where: { id: defenderCountryId }, select: { treasury: true } }),
+      ]);
+      await announceWarDeclared({
+        attackerName:     war.attackerCountry.nameRu,
+        attackerFlag:     war.attackerCountry.flag,
+        attackerTreasury: atk?.treasury ?? 0n,
+        defenderName:     war.defenderCountry.nameRu,
+        defenderFlag:     war.defenderCountry.flag,
+        defenderTreasury: def?.treasury ?? 0n,
+        endAt:            war.endAt,
+      });
+    })().catch(e => logError("[Wars] анонс войны в канал:", e));
+
+    // Автоматический матчмейкинг — запустить первые партии через 5 секунд
+    setTimeout(async () => {
+      try {
+        const { scheduleWarMatches } = await import("@/services/game/warMatchmaking");
+        const created = await scheduleWarMatches(war.id);
+        logger.info(`[Wars] Auto-matchmaking started for war ${war.id}: ${created} matches created`);
+      } catch (err) {
+        logError("[Wars] Auto-matchmaking start error:", err);
+      }
+    }, 5000);
+
+    res.json({ success: true, war: formatWar(war) });
+  } catch (e: unknown) {
+    logError("[Wars]", e);
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /wars/:warId/challenge — вызвать бойца в рамках войны
+// ─────────────────────────────────────────────────────────────────────────────
+warsRouter.post("/:warId/challenge", authMiddleware, validate(ChallengeSchema), async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { warId } = req.params;
+    const { opponentUserId } = req.body; // R4: validated
+
+    if (!opponentUserId) return res.status(400).json({ error: "opponentUserId required" });
+
+    const war = await prisma.countryWar.findUnique({ where: { id: warId } });
+    if (!war || war.status !== "IN_PROGRESS") return res.status(400).json({ error: "War not active" });
+
+    if (new Date() > war.endAt) return res.status(400).json({ error: "War has ended" });
+
+    // Проверить что пользователь боец в одной из стран
+    const myMembership = await prisma.countryMember.findUnique({ where: { userId } });
+    if (!myMembership) return res.status(403).json({ error: "You are not in any country" });
+
+    const isAttacker = myMembership.countryId === war.attackerCountryId;
+    const isDefender = myMembership.countryId === war.defenderCountryId;
+    if (!isAttacker && !isDefender) return res.status(403).json({ error: "Your country is not in this war" });
+
+    // Проверить что opponent — боец страны-противника
+    const opponentMembership = await prisma.countryMember.findUnique({ where: { userId: opponentUserId } });
+    if (!opponentMembership) return res.status(400).json({ error: "Opponent is not in any country" });
+
+    const expectedOpponentCountry = isAttacker ? war.defenderCountryId : war.attackerCountryId;
+    if (opponentMembership.countryId !== expectedOpponentCountry) {
+      return res.status(400).json({ error: "Opponent is not fighting for the enemy country" });
+    }
+
+    // W2: Лимит одновременных батлов в войне — максимум 10
+    const activeBattlesCount = await prisma.warBattle.count({
+      where: {
+        warId,
+        status: "IN_PROGRESS",
+      },
+    });
+    if (activeBattlesCount >= 10) {
+      return res.status(400).json({
+        error: "WAR_BATTLES_LIMIT",
+        message: "Concurrent battle limit reached (10). Wait for current games to finish.",
+      });
+    }
+
+    // Q1 fix: session + warBattle в одной атомарной транзакции
+    const chess = new Chess();
+    const sessionCode = nanoid(8).toUpperCase();
+
+    const { session } = await prisma.$transaction(async (tx: import("@prisma/client").Prisma.TransactionClient) => {
+      const session = await tx.session.create({
+        data: {
+          status: "WAITING_FOR_OPPONENT",
+          type: "BATTLE",
+          fen: chess.fen(),
+          pgn: "",
+          code: sessionCode,
+          sides: {
+            create: [
+              { playerId: userId, status: "WAITING_FOR_OPPONENT", isWhite: true },
+            ],
+          },
+          activeUsers: { connect: [{ id: userId }] },
+        },
+      });
+
+      // Связать с войной в той же транзакции
+      await tx.warBattle.create({
+        data: {
+          warId,
+          sessionId: session.id,
+          attackerId: isAttacker ? userId : opponentUserId,
+          defenderId: isAttacker ? opponentUserId : userId,
+          attackerCountryId: war.attackerCountryId,
+          defenderCountryId: war.defenderCountryId,
+        },
+      });
+
+      return { session };
+    });
+
+    // Уведомить оппонента — передаём code чтобы он мог вызвать game:join
+    try {
+      getIo().emit(`user:${opponentUserId}`, {
+        type: "war:challenge",
+        sessionId: session.id,
+        sessionCode,           // FIX #4: добавлен code для game:join
+        warId,
+        challengerUserId: userId,
+        message: "You have been challenged to a war duel!",
+      });
+    } catch {}
+
+    res.json({ success: true, sessionId: session.id, sessionCode });
+  } catch (e: unknown) {
+    logError("[Wars]", e);
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ── Форматирование войны ─────────────────────────────────────────────────────
+type WarRecord = Record<string,unknown> & { id: string; endAt?: string | Date; _count?: { battles?: number } };
+function formatWar(war: WarRecord) {
+  const now = new Date();
+  const endAt = new Date(war.endAt as string | Date);
+  const secondsLeft = Math.max(0, Math.floor((endAt.getTime() - now.getTime()) / 1000));
+
+  return {
+    id: war.id,
+    status: war.status,
+    attackerCountryId: war.attackerCountryId,
+    defenderCountryId: war.defenderCountryId,
+    attackerCountry: war.attackerCountry,
+    defenderCountry: war.defenderCountry,
+    attackerWins: war.attackerWins,
+    defenderWins: war.defenderWins,
+    prizePerWin: war.prizePerWin?.toString() ?? "100",
+    duration: war.duration,
+    startedAt: war.startedAt,
+    endAt: war.endAt,
+    secondsLeft,
+    finishedAt: war.finishedAt ?? null,
+    winnerCountryId: war.winnerCountryId ?? null,
+    declaredByUserId: war.declaredByUserId,
+    battleCount: (war._count as Record<string,unknown> | undefined)?.battles as number ?? 0,
+  };
+}
+
+// ── POST /wars/countries/:id/donate — донат в казну страны ───────────────────
+warsRouter.post("/countries/:id/donate", authMiddleware, async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const countryId = req.params.id;
+  const amount = BigInt(req.body.amount); // R4: validated by DonateWarSchema
+
+  if (amount <= 0n) return res.status(400).json({ error: "Invalid amount" });
+
+  try {
+    const membership = await prisma.countryMember.findFirst({
+      where: { userId, countryId },
+    });
+    if (!membership) return res.status(403).json({ error: "Not a member of this country" });
+
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    if (BigInt(user.balance) < amount) return res.status(400).json({ error: "Insufficient balance" });
+
+    // Атомарно: списываем → казна страны растёт → личный contribution растёт.
+    // contribution → доля в распределении трофеев войны.
+    const { updated, newContribution } = await prisma.$transaction(async (tx) => {
+      await updateBalance(userId, -amount, TransactionType.COUNTRY_DONATION, { countryId }, { tx });
+      const upd = await tx.country.update({
+        where: { id: countryId },
+        data: { treasury: { increment: amount } },
+      });
+      const memb = await tx.countryMember.update({
+        where: { id: membership.id },
+        data: { contribution: { increment: amount } },
+      });
+      return { updated: upd, newContribution: memb.contribution };
+    });
+
+    res.json({
+      success: true,
+      treasury: updated.treasury.toString(),
+      myContribution: newContribution.toString(),
+    });
+  } catch (e: unknown) {
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ── GET /wars/countries/:id/members — список бойцов страны ───────────────────
+warsRouter.get("/countries/:id/members", authMiddleware, async (req: Request, res: Response) => {
+  const countryId = req.params.id;
+  try {
+    const members = await prisma.countryMember.findMany({
+      where: { countryId },
+      orderBy: [{ warWins: "desc" }, { joinedAt: "asc" }],
+      include: {
+        user: {
+          select: {
+            id: true, firstName: true, lastName: true, username: true,
+            avatar: true, avatarType: true, avatarGradient: true,
+            elo: true, league: true, militaryRank: true,
+          },
+        },
+      },
+    });
+    const fmt = members.map((m, i) => ({
+      userId: m.userId,
+      rank: i + 1,
+      isCommander: i === 0,
+      warWins: m.warWins,
+      warLosses: m.warLosses,
+      joinedAt: m.joinedAt,
+      user: m.user,
+    }));
+    res.json({ members: fmt });
+  } catch (e: unknown) {
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});

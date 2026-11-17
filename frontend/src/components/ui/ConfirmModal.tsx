@@ -1,0 +1,102 @@
+/**
+ * ConfirmModal.tsx
+ * N9: Кастомный модал подтверждения — заменяет серый window.confirm()
+ * Используется в магазине (покупки), войнах (выход из страны), профиле
+ *
+ * Использование:
+ *   const [confirm, ConfirmDialog] = useConfirm();
+ *   // в JSX: {ConfirmDialog}
+ *   // вызов: const ok = await confirm({ title: '...', message: '...', okLabel: '...' });
+ */
+
+import React, { useState, useCallback } from 'react';
+import Modal from './Modal';
+
+interface ConfirmOptions {
+  title: string;
+  message?: string;
+  okLabel?: string;
+  cancelLabel?: string;
+  danger?: boolean; // красная кнопка подтверждения
+}
+
+type Resolve = (value: boolean) => void;
+
+export const useConfirm = (): [
+  (opts: ConfirmOptions) => Promise<boolean>,
+  React.ReactNode
+] => {
+  const [opts, setOpts] = useState<ConfirmOptions | null>(null);
+  const [resolve, setResolve] = useState<Resolve | null>(null);
+
+  const confirm = useCallback((options: ConfirmOptions): Promise<boolean> => {
+    return new Promise((res) => {
+      setOpts(options);
+      setResolve(() => res);
+    });
+  }, []);
+
+  const handle = (result: boolean) => {
+    resolve?.(result);
+    setOpts(null);
+    setResolve(null);
+  };
+
+  const dialog = (
+    <Modal isOpen={!!opts} onClose={() => handle(false)}>
+      <Modal.Header>{opts?.title}</Modal.Header>
+      {opts?.message && (
+        <Modal.Body center>{opts.message}</Modal.Body>
+      )}
+      <Modal.Footer>
+        {/* PR-3 hotfix 2026-05-18: все цвета — хардкод тёмные, никаких CSS vars
+            (см. Modal.tsx — корень бага был в light-media-query, который
+            переписывал переменные даже в dark-теме приложения). */}
+        <button
+          aria-label={opts?.cancelLabel ?? 'Cancel'}
+          onClick={() => handle(false)}
+          style={{
+            flex: 1,
+            padding: '13px',
+            borderRadius: 14,
+            background: '#1C2030',
+            border: '1px solid rgba(255,255,255,0.10)',
+            color: '#F0F2F8',
+            fontSize: 14,
+            fontWeight: 600,
+            cursor: 'pointer',
+            fontFamily: 'inherit',
+          }}
+        >
+          {opts?.cancelLabel ?? 'Cancel'}
+        </button>
+        <button
+          aria-label={opts?.okLabel ?? 'Confirm'}
+          onClick={() => handle(true)}
+          style={{
+            flex: 1,
+            padding: '13px',
+            borderRadius: 14,
+            background: opts?.danger
+              ? 'rgba(255,77,106,0.18)'
+              : '#F5C842',
+            border: opts?.danger
+              ? '1px solid rgba(255,77,106,0.45)'
+              : 'none',
+            color: opts?.danger
+              ? '#FF8090'
+              : '#0B0D11',
+            fontSize: 14,
+            fontWeight: 700,
+            cursor: 'pointer',
+            fontFamily: 'inherit',
+          }}
+        >
+          {opts?.okLabel ?? 'Confirm'}
+        </button>
+      </Modal.Footer>
+    </Modal>
+  );
+
+  return [confirm, dialog];
+};

@@ -1,0 +1,213 @@
+import os
+import logging
+from typing import Any
+import aiohttp
+
+logger = logging.getLogger(__name__)
+
+_raw_backend_url = os.getenv("BACKEND_URL", "http://backend:3000/api/v1")
+BOT_API_SECRET = os.getenv("BOT_API_SECRET", "")
+
+# aiohttp.ClientSession(base_url=...) does NOT support paths in base_url.
+# Split "http://backend:3000/api/v1" → base="http://backend:3000", prefix="/api/v1"
+from urllib.parse import urlparse
+
+_parsed = urlparse(_raw_backend_url)
+BACKEND_BASE = f"{_parsed.scheme}://{_parsed.netloc}"
+BACKEND_PREFIX = _parsed.path.rstrip("/")  # e.g. "/api/v1"
+
+
+class BackendClient:
+    """Async HTTP клиент к ChessCoin backend. Используется как async context manager."""
+
+    def __init__(self):
+        self._session: aiohttp.ClientSession | None = None
+
+    async def __aenter__(self):
+        self._session = aiohttp.ClientSession(
+            base_url=BACKEND_BASE,
+            headers={
+                "Authorization": f"Bearer {BOT_API_SECRET}",
+                "Content-Type": "application/json",
+            },
+            timeout=aiohttp.ClientTimeout(total=10),
+        )
+        return self
+
+    async def __aexit__(self, *_):
+        if self._session:
+            await self._session.close()
+
+    def _url(self, path: str) -> str:
+        """Prepend BACKEND_PREFIX to relative paths."""
+        return f"{BACKEND_PREFIX}{path}"
+
+    async def _post(self, path: str, payload: dict) -> dict:
+        async with self._session.post(self._url(path), json=payload) as resp:
+            data = await resp.json()
+            if not resp.ok:
+                raise RuntimeError(f"Backend {resp.status}: {data}")
+            return data
+
+    async def _get(self, path: str, params: dict | None = None) -> dict:
+        async with self._session.get(self._url(path), params=params) as resp:
+            data = await resp.json()
+            if not resp.ok:
+                raise RuntimeError(f"Backend {resp.status}: {data}")
+            return data
+
+    # ─── Уведомления ──────────────────────────────────────────────────────────
+
+    async def notify_user(self, telegram_id: str, message: str) -> dict:
+        """Отправить уведомление пользователю (бэкенд пушит через Bot API)."""
+        return await self._post("/bot/notify", {
+            "telegramId": telegram_id,
+            "message": message,
+        })
+
+    async def notify_referral_arrival(
+        self, referrer_telegram_id: str, new_user_name: str
+    ) -> None:
+        """Уведомить пригласившего о новом реферале."""
+        try:
+            await self.notify_user(
+                telegram_id=referrer_telegram_id,
+                message=(
+                    f"👥 По вашей реферальной ссылке зарегистрировался "
+                    f"<b>{new_user_name}</b>!\n"
+                    f"Когда он сыграет первую игру, вы получите <b>3 000 ᚙ</b>."
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"notify_referral_arrival failed: {e}")
+
+    # ─── Статистика ───────────────────────────────────────────────────────────
+
+    async def get_stats(self) -> dict:
+        return await self._get("/bot/stats")
+
+    # ─── Администрирование ────────────────────────────────────────────────────
+
+    async def broadcast(self, text: str | None = None, photo: str | None = None,
+                        button: dict | None = None, target: str = "users",
+                        channel_id: str | None = None) -> dict:
+        """PR-3 расширение: photo + inline-button + target (users/channel/both)."""
+        payload: dict = {"target": target}
+        if text is not None: payload["text"] = text
+        if photo is not None: payload["photo"] = photo
+        if button is not None: payload["button"] = button
+        if channel_id is not None: payload["channelId"] = channel_id
+        return await self._post("/bot/broadcast", payload)
+
+    async def ban_user(self, telegram_id: str) -> dict:
+        return await self._post("/bot/ban", {"telegramId": telegram_id})
+
+    # ─── Уведомления (AdminNotification polling) ──────────────────────────────
+
+    async def get_pending_notifications(self) -> list:
+        """Получить несотправленные AdminNotification."""
+        data = await self._get("/bot/notifications/pending")
+        return data.get("notifications", [])
+
+    async def mark_notification_sent(self, notification_id: str) -> None:
+        """Пометить уведомление как отправленное."""
+        await self._post(f"/bot/notifications/{notification_id}/sent", {})
+
+    # ─── Проверка существования пользователя ─────────────────────────────────
+
+    async def check_user_exists(self, telegram_id: str) -> dict:
+        """Проверить зарегистрирован ли пользователь (для /start нового vs вернувшегося)."""
+        try:
+            return await self._get("/bot/user-exists", {"telegramId": telegram_id})
+        except Exception:
+            return {"exists": False}
+
+    # ─── Реферальная регистрация ──────────────────────────────────────────────
+
+    async def register_referral_start(
+        self, new_telegram_id: str, referrer_telegram_id: str
+    ) -> None:
+        """Сохранить связь реферал→пригласивший до первого auth/login."""
+        try:
+            await self._post("/bot/referral-start", {
+                "newTelegramId": new_telegram_id,
+                "referrerTelegramId": referrer_telegram_id,
+            })
+        except Exception as e:
+            logger.warning(f"register_referral_start: {e}")
+
+    # ─── Детальная статистика ─────────────────────────────────────────────────
+
+    async def get_detailed_stats(self) -> dict:
+        """Расширенная статистика: пользователи, сессии, экономика."""
+        return await self._get("/bot/stats/detailed")
+
+    # ─── Управление заданиями ─────────────────────────────────────────────────
+
+    async def get_tasks(self) -> list:
+        """Список всех заданий с числом выполнений."""
+        data = await self._get("/bot/tasks")
+        return data if isinstance(data, list) else []
+
+    async def create_task(self, payload: dict) -> dict:
+        """Создать новое социальное задание."""
+        return await self._post("/bot/tasks/create", payload)
+
+    async def create_avatar_item(self, payload: dict) -> dict:
+        """A2: создать premium-аватар (PREMIUM_AVATAR item).
+        payload: { name, description?, priceCoins, imageUrl, rarity? }
+        """
+        return await self._post("/bot/items/avatar", payload)
+
+    async def list_avatars(self) -> list:
+        """Список всех premium-аватаров (для управления)."""
+        data = await self._get("/bot/items/avatars")
+        return data.get("items", []) if isinstance(data, dict) else []
+
+    async def update_avatar(self, avatar_id: str, payload: dict) -> dict:
+        """Изменить имя/цену/редкость/активность аватара."""
+        async with self._session.patch(self._url(f"/bot/items/avatar/{avatar_id}"), json=payload) as resp:
+            data = await resp.json()
+            if not resp.ok:
+                raise RuntimeError(f"Backend {resp.status}: {data}")
+            return data
+
+    async def delete_avatar(self, avatar_id: str) -> dict:
+        """Удалить (или деактивировать, если куплен) аватар."""
+        async with self._session.delete(self._url(f"/bot/items/avatar/{avatar_id}")) as resp:
+            data = await resp.json()
+            if not resp.ok:
+                raise RuntimeError(f"Backend {resp.status}: {data}")
+            return data
+
+    async def toggle_task(self, task_id: str) -> dict:
+        """Переключить статус задания ACTIVE ↔ ARCHIVED."""
+        async with self._session.put(self._url(f"/bot/tasks/{task_id}/toggle")) as resp:
+            data = await resp.json()
+            if not resp.ok:
+                raise RuntimeError(f"Backend {resp.status}: {data}")
+            return data
+
+    async def delete_task(self, task_id: str) -> dict:
+        """Удалить задание (вместе со всеми записями о выполнении)."""
+        async with self._session.delete(self._url(f"/bot/tasks/{task_id}")) as resp:
+            data = await resp.json()
+            if not resp.ok:
+                raise RuntimeError(f"Backend {resp.status}: {data}")
+            return data
+
+    # ─── Операции очистки БД ──────────────────────────────────────────────────
+
+    async def cleanup_dead(self) -> dict:
+        """Запустить очистку мёртвых аккаунтов (не играли 30+ дней)."""
+        return await self._post("/bot/cleanup/dead", {})
+
+    async def cleanup_sessions(self) -> dict:
+        """Отменить зависшие сессии (ожидание >1ч, в процессе >6ч)."""
+        return await self._post("/bot/cleanup/sessions", {})
+
+    # ─── Управление сервером ──────────────────────────────────────────────────
+
+    async def restart_backend(self) -> dict:
+        """Перезапустить бэкенд-контейнер (graceful shutdown → Docker restart)."""
+        return await self._post("/bot/restart", {})

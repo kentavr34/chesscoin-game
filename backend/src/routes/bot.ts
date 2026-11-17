@@ -1,0 +1,758 @@
+import { Router, Request, Response, NextFunction } from "express";
+import { getCirculationStats } from "@/services/treasury";
+import { logger, logError } from "@/lib/logger";
+import { prisma } from "../lib/prisma";
+import { updateBalance } from "../services/economy";
+import { cleanDeadPlayers } from "../services/cleanup";
+import { TransactionType } from "@prisma/client";
+
+export const botRouter = Router();
+
+// ─── Middleware: только для Python бота (BOT_API_SECRET) ──────────────────────
+function botSecretMiddleware(req: Request, res: Response, next: NextFunction) {
+  const secret = process.env.BOT_API_SECRET;
+  const auth = req.headers.authorization;
+
+  // SEC-001: timing-safe comparison to prevent timing attacks
+  if (!secret || !auth) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  const expected = `Bearer ${secret}`;
+  if (auth.length !== expected.length) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  const { timingSafeEqual } = require("crypto");
+  if (!timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+}
+
+botRouter.use(botSecretMiddleware);
+
+// ─── POST /api/v1/bot/notify ──────────────────────────────────────────────────
+botRouter.post("/notify", async (req: Request, res: Response) => {
+  try {
+    const { telegramId, message } = req.body;
+    if (!telegramId || !message)
+      return res.status(400).json({ error: "telegramId и message обязательны" });
+
+    // Проверяем что пользователь существует
+    const user = await prisma.user.findUnique({
+      where: { telegramId: String(telegramId) },
+      select: { id: true, isBanned: true },
+    });
+    if (!user || user.isBanned)
+      return res.status(404).json({ error: "User not found or banned" });
+
+    // Отправляем через Telegram Bot API
+    const botToken = process.env.BOT_TOKEN;
+    if (!botToken) return res.status(500).json({ error: "BOT_TOKEN не задан" });
+
+    const tgRes = await fetch(
+      `https://api.telegram.org/bot${botToken}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: telegramId,
+          text: message,
+          parse_mode: "HTML",
+        }),
+      }
+    );
+
+    const tgData = await tgRes.json() as Record<string, unknown>;
+    if (!tgData.ok) {
+      return res.status(400).json({ error: tgData.description });
+    }
+
+    res.json({ success: true });
+  } catch (err: unknown) {
+    logger.error("[bot/notify]", err);
+    res.status(500).json({ error: "Failed to send notification" });
+  }
+});
+
+// ─── GET /api/v1/bot/stats ────────────────────────────────────────────────────
+// PR-3 (Кенан 2026-05-18): расширенная сводка экономики для /stats в боте.
+// Дополнительно: суммы балансов юзеров, активность 24ч, топ-10 балансов,
+// призовые выплаты, сделки в магазине, казны стран и пулы турниров.
+botRouter.get("/stats", async (_req: Request, res: Response) => {
+  try {
+    const dayAgo = new Date(Date.now() - 86_400_000);
+    const [
+      totalUsers,
+      totalSessions,
+      totalBattles,
+      config,
+      balanceAgg,
+      countryTreasuryAgg,
+      activeTournamentPoolAgg,
+      newUsersToday,
+      activeUsers24h,
+      shopPurchasesToday,
+      prizePayoutsToday,
+      top10,
+    ] = await Promise.all([
+      prisma.user.count({ where: { isBot: false } }),
+      prisma.session.count(),
+      prisma.session.count({ where: { type: "BATTLE" } }),
+      prisma.platformConfig.findUnique({ where: { id: "singleton" } }),
+      prisma.user.aggregate({ _sum: { balance: true }, where: { isBot: false, isBanned: false } }),
+      prisma.country.aggregate({ _sum: { treasury: true } }),
+      prisma.tournament.aggregate({
+        _sum: { prizePool: true, donationPool: true },
+        where: { status: { in: ["REGISTRATION", "IN_PROGRESS"] } },
+      }),
+      prisma.user.count({ where: { isBot: false, createdAt: { gte: dayAgo } } }),
+      prisma.user.count({ where: { isBot: false, updatedAt: { gte: dayAgo } } }),
+      prisma.transaction.count({
+        where: {
+          createdAt: { gte: dayAgo },
+          type: { in: ["ITEM_PURCHASE", "TON_DEPOSIT", "EXCHANGE_BUY", "EXCHANGE_SELL", "TRADE_BUY", "TRADE_SELL"] },
+        },
+      }),
+      prisma.transaction.count({
+        where: {
+          createdAt: { gte: dayAgo },
+          type: { in: ["BATTLE_WIN", "BOT_WIN", "TOURNAMENT_WIN", "COUNTRY_WAR_WIN", "CLAN_WAR_WIN", "FRIENDLY_WIN"] },
+        },
+      }),
+      prisma.user.findMany({
+        where: { isBot: false, isBanned: false },
+        orderBy: { balance: "desc" },
+        take: 10,
+        select: { firstName: true, username: true, telegramId: true, balance: true },
+      }),
+    ]);
+
+    const usersBalance = balanceAgg._sum.balance ?? 0n;
+    const countriesTreasury = countryTreasuryAgg._sum.treasury ?? 0n;
+    const tournamentsPool = (activeTournamentPoolAgg._sum.prizePool ?? 0n) + (activeTournamentPoolAgg._sum.donationPool ?? 0n);
+    const platformReserve = config?.platformReserve ?? 0n;
+    const totalEmitted = config?.totalEmitted ?? 0n;
+    // Монеты в обращении — отдельным блоком (Кенан 31.07.2026).
+    // Прежняя цифра totalInCirculation прибавляла резерв платформы и потому
+    // показывала почти весь капитал: резерв — это НЕ выпущенные монеты.
+    const circulation = await getCirculationStats();
+    const totalInCirculation = usersBalance + countriesTreasury + tournamentsPool + platformReserve;
+
+    res.json({
+      circulation,
+      totalUsers,
+      totalSessions,
+      totalBattles,
+      totalEmitted: totalEmitted.toString(),
+      platformReserve: platformReserve.toString(),
+      currentPhase: config?.currentPhase ?? 1,
+      // PR-3 новые поля
+      totalInCirculation: totalInCirculation.toString(),
+      usersBalance: usersBalance.toString(),
+      countriesTreasury: countriesTreasury.toString(),
+      tournamentsPool: tournamentsPool.toString(),
+      newUsersToday,
+      activeUsers24h,
+      shopPurchasesToday,
+      prizePayoutsToday,
+      top10: top10.map(u => ({
+        firstName: u.firstName,
+        username: u.username,
+        telegramId: u.telegramId,
+        balance: u.balance.toString(),
+      })),
+    });
+  } catch (err: unknown) {
+    logger.error("[bot/stats]", err);
+    res.status(500).json({ error: "Failed to get stats" });
+  }
+});
+
+// ─── POST /api/v1/bot/broadcast ───────────────────────────────────────────────
+// PR-3 (Кенан 2026-05-18): расширенная рассылка с поддержкой:
+//   • photo: URL картинки или file_id Telegram (опц.)
+//   • button: { text, url } — inline-кнопка под сообщением (опц.)
+//   • target: 'users' | 'channel' | 'both' (default 'users')
+//   • channelId: id канала (если target включает channel; по умолчанию из ENV)
+//
+// Логика отправки:
+// - Если есть photo → sendPhoto с caption=text. Иначе sendMessage с text.
+// - Reply markup с inline-кнопкой если задано button.
+// - Throttle 30 msg/sec для users-рассылки (Telegram API rate limit).
+botRouter.post("/broadcast", async (req: Request, res: Response) => {
+  try {
+    const { text, photo, button, target, channelId } = req.body as {
+      text?: string;
+      photo?: string;
+      button?: { text: string; url: string };
+      target?: 'users' | 'channel' | 'both';
+      channelId?: string;
+    };
+    if (!text && !photo) return res.status(400).json({ error: "text или photo обязателен" });
+
+    const botToken = process.env.BOT_TOKEN;
+    if (!botToken) return res.status(500).json({ error: "BOT_TOKEN не задан" });
+
+    const tgt = target ?? 'users';
+    const resolvedChannelId = channelId ?? process.env.TELEGRAM_CHANNEL_ID ?? '';
+
+    const reply_markup = button?.text && button?.url
+      ? { inline_keyboard: [[{ text: button.text, url: button.url }]] }
+      : undefined;
+
+    async function sendTo(chatId: string): Promise<boolean> {
+      try {
+        const url = photo
+          ? `https://api.telegram.org/bot${botToken}/sendPhoto`
+          : `https://api.telegram.org/bot${botToken}/sendMessage`;
+        const body: Record<string, unknown> = photo
+          ? { chat_id: chatId, photo, caption: text ?? '', parse_mode: "HTML" }
+          : { chat_id: chatId, text: text ?? '', parse_mode: "HTML" };
+        if (reply_markup) body.reply_markup = reply_markup;
+        const r = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const d = await r.json() as Record<string, unknown>;
+        return !!d.ok;
+      } catch { return false; }
+    }
+
+    let sent = 0;
+    let failed = 0;
+    let channelOk = false;
+
+    // 1) Канал — один send, без throttle.
+    if (tgt === 'channel' || tgt === 'both') {
+      if (!resolvedChannelId) return res.status(400).json({ error: "channelId не задан и TELEGRAM_CHANNEL_ID не настроен в env" });
+      channelOk = await sendTo(resolvedChannelId);
+    }
+
+    // 2) Users — батч с throttle 30/sec.
+    if (tgt === 'users' || tgt === 'both') {
+      const users = await prisma.user.findMany({
+        where: { isBot: false, isBanned: false },
+        select: { telegramId: true },
+      });
+      for (let i = 0; i < users.length; i++) {
+        const ok = await sendTo(users[i]!.telegramId);
+        ok ? sent++ : failed++;
+        if (i % 30 === 29) await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+
+    res.json({ sent, failed, channelOk, target: tgt, totalUsers: sent + failed });
+  } catch (err: unknown) {
+    logger.error("[bot/broadcast]", err);
+    res.status(500).json({ error: "Broadcast error" });
+  }
+});
+
+// ─── POST /api/v1/bot/ban ─────────────────────────────────────────────────────
+botRouter.post("/ban", async (req: Request, res: Response) => {
+  try {
+    const { telegramId } = req.body;
+    if (!telegramId) return res.status(400).json({ error: "telegramId обязателен" });
+
+    const user = await prisma.user.update({
+      where: { telegramId: String(telegramId) },
+      data: { isBanned: true },
+    });
+
+    res.json({ success: true, userId: user.id });
+  } catch (err: unknown) {
+    if ((err as Record<string,unknown>).code === "P2025")
+      return res.status(404).json({ error: "User not found" });
+    logger.error("[bot/ban]", err);
+    res.status(500).json({ error: "Ban error" });
+  }
+});
+
+// ── AdminNotification polling ──────────────────────────────────────────────
+
+// GET /api/v1/bot/notifications/pending
+botRouter.get("/notifications/pending", async (_req: import("express").Request, res: import("express").Response) => {
+  try {
+    const notifications = await prisma.adminNotification.findMany({
+      where: { sentAt: null },
+      orderBy: { createdAt: "asc" },
+      take: 50,
+    });
+    res.json({ notifications });
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// POST /api/v1/bot/notifications/:id/sent
+botRouter.post("/notifications/:id/sent", async (req: import("express").Request, res: import("express").Response) => {
+  try {
+    await prisma.adminNotification.update({
+      where: { id: req.params.id },
+      data: { sentAt: new Date() },
+    });
+    res.json({ ok: true });
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ── Referral start ──────────────────────────────────────────────────────────
+
+// POST /api/v1/bot/referral-start
+botRouter.post("/referral-start", async (req: import("express").Request, res: import("express").Response) => {
+  try {
+    const { newTelegramId, referrerTelegramId } = req.body;
+    if (!newTelegramId || !referrerTelegramId) {
+      return res.status(400).json({ error: "Missing fields" });
+    }
+    await prisma.pendingReferral.upsert({
+      where: { newTelegramId },
+      create: { newTelegramId, referrerTelegramId },
+      update: { referrerTelegramId },
+    });
+    res.json({ ok: true });
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ── GET /api/v1/bot/stats/detailed ──────────────────────────────────────────
+botRouter.get("/stats/detailed", async (_req: Request, res: Response) => {
+  try {
+    const now = new Date();
+    const todayStart = new Date(now);
+    todayStart.setHours(0, 0, 0, 0);
+    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+    const sixHoursAgo = new Date(now.getTime() - 6 * 60 * 60 * 1000);
+
+    const [
+      totalUsers, todayUsers, weekUsers, monthUsers,
+      bronzeCount, silverCount, goldCount, diamondCount, championCount, starCount,
+      totalSessions, battleSessions, botSessions, friendlySessions,
+      waitingSessions, inProgressSessions,
+      stuckWaiting, stuckInProgress,
+      config,
+      commissionAgg,
+      tonDeposits,
+    ] = await Promise.all([
+      prisma.user.count({ where: { isBot: false } }),
+      prisma.user.count({ where: { isBot: false, createdAt: { gte: todayStart } } }),
+      prisma.user.count({ where: { isBot: false, createdAt: { gte: weekAgo } } }),
+      prisma.user.count({ where: { isBot: false, createdAt: { gte: monthAgo } } }),
+      prisma.user.count({ where: { isBot: false, league: "BRONZE" } }),
+      prisma.user.count({ where: { isBot: false, league: "SILVER" } }),
+      prisma.user.count({ where: { isBot: false, league: "GOLD" } }),
+      prisma.user.count({ where: { isBot: false, league: "DIAMOND" } }),
+      prisma.user.count({ where: { isBot: false, league: "CHAMPION" } }),
+      prisma.user.count({ where: { isBot: false, league: "STAR" } }),
+      prisma.session.count(),
+      prisma.session.count({ where: { type: "BATTLE" } }),
+      prisma.session.count({ where: { type: "BOT" } }),
+      prisma.session.count({ where: { type: "FRIENDLY" } }),
+      prisma.session.count({ where: { status: "WAITING_FOR_OPPONENT" } }),
+      prisma.session.count({ where: { status: "IN_PROGRESS" } }),
+      prisma.session.count({ where: { status: "WAITING_FOR_OPPONENT", createdAt: { lt: oneHourAgo } } }),
+      prisma.session.count({ where: { status: "IN_PROGRESS", updatedAt: { lt: sixHoursAgo } } }),
+      prisma.platformConfig.findUnique({ where: { id: "singleton" } }),
+      prisma.transaction.aggregate({ where: { type: "BATTLE_COMMISSION" }, _sum: { amount: true } }),
+      prisma.tonDeposit.count(),
+    ]);
+
+    // Обращение и казна — из одного места, что и в остальной статистике.
+    const circulation = await getCirculationStats();
+
+    // Цена монеты считается от курса TON, а не хранится числом: 100 000 монет
+    // за 1 TON. Курс берём с CoinGecko, при недоступности — запасное значение.
+    const COINS_PER_TON_STATS = 100_000;
+    let tonUsdt = 5.5;
+    try {
+      const resp = await fetch(
+        "https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd",
+        { signal: AbortSignal.timeout(3000) },
+      );
+      if (resp.ok) {
+        const data = await resp.json() as { "the-open-network"?: { usd?: number } };
+        tonUsdt = data["the-open-network"]?.usd ?? tonUsdt;
+      }
+    } catch { /* сеть недоступна — покажем запасной курс, но не соврём нулём */ }
+    const coinPriceUsd = tonUsdt / COINS_PER_TON_STATS;
+
+    res.json({
+      users: {
+        total: totalUsers,
+        today: todayUsers,
+        week: weekUsers,
+        month: monthUsers,
+        byLeague: {
+          BRONZE: bronzeCount,
+          SILVER: silverCount,
+          GOLD: goldCount,
+          DIAMOND: diamondCount,
+          CHAMPION: championCount,
+          STAR: starCount,
+        },
+      },
+      sessions: {
+        total: totalSessions,
+        battles: battleSessions,
+        bot: botSessions,
+        friendly: friendlySessions,
+        waiting: waitingSessions,
+        inProgress: inProgressSessions,
+        stuckWaiting,
+        stuckInProgress,
+      },
+      // Экономика считается по РЕАЛЬНЫМ счетам, а не по счётчикам.
+      // Кенан 01.08.2026 назвал прежние цифры сомнительными — и был прав:
+      //   · «эмиттировано» показывало 2 006 200 при обращении 9 027 999:
+      //     счётчик двигался только там, где передавали флаг эмиссии;
+      //   · «резерв» расходился со счётом платформы на 17 млн по той же причине;
+      //   · «цена токена» стояла $0.001, хотя при курсе 100 000 монет за TON
+      //     монета стоит примерно $0.000014 — ошибка в семьдесят раз;
+      //   · «депозитов TON» читалось из старой таблицы и было всегда 0.
+      economy: {
+        phase: config?.currentPhase ?? 1,
+        capital: circulation.capital,
+        inCirculation: circulation.circulation,
+        circulationPercent: circulation.circulationPercent,
+        treasury: circulation.treasury,
+        balanced: circulation.balanced,
+        threshold: circulation.phase,
+        nextThreshold: circulation.nextThreshold,
+        tokenPriceUsd: coinPriceUsd,
+        tonUsdt,
+        coinsPerTon: COINS_PER_TON_STATS,
+        totalCommission: (commissionAgg._sum.amount ?? 0n).toString(),
+        tonDeposits,
+      },
+    });
+  } catch (err: unknown) {
+    logger.error("[bot/stats/detailed]", err);
+    res.status(500).json({ error: "Failed to get detailed stats" });
+  }
+});
+
+// ── GET /api/v1/bot/tasks ─────────────────────────────────────────────────────
+botRouter.get("/tasks", async (_req: Request, res: Response) => {
+  try {
+    const tasks = await prisma.task.findMany({
+      orderBy: { createdAt: "desc" },
+      include: {
+        _count: { select: { completedBy: true } },
+      },
+    });
+    res.json(tasks.map((t: Record<string,unknown> & { winningAmount?: string | bigint | null }) => ({
+      ...t,
+      winningAmount: (String(t.winningAmount ?? "0")),
+    })));
+  } catch (err: unknown) {
+    logger.error("[bot/tasks GET]", err);
+    res.status(500).json({ error: "Failed to get tasks" });
+  }
+});
+
+// ── POST /api/v1/bot/tasks/create ─────────────────────────────────────────────
+botRouter.post("/tasks/create", async (req: Request, res: Response) => {
+  try {
+    const { taskType, title, description, winningAmount, metadata, icon, status } = req.body;
+    if (!taskType || !title || winningAmount == null || !metadata || !icon) {
+      return res.status(400).json({ error: "Required fields: taskType, title, winningAmount, metadata, icon" });
+    }
+    const task = await prisma.task.create({
+      data: {
+        taskType,
+        title,
+        description: description ?? null,
+        winningAmount: BigInt(winningAmount),
+        metadata,
+        icon,
+        status: status ?? "ACTIVE",
+      },
+    });
+    res.json({ ...task, winningAmount: task.winningAmount.toString() });
+  } catch (err: unknown) {
+    logger.error("[bot/tasks/create]", err);
+    res.status(500).json({ error: "Failed to create task" });
+  }
+});
+
+// ── PUT /api/v1/bot/tasks/:id/toggle ──────────────────────────────────────────
+botRouter.put("/tasks/:id/toggle", async (req: Request, res: Response) => {
+  try {
+    const existing = await prisma.task.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ error: "Task not found" });
+    const newStatus = existing.status === "ACTIVE" ? "ARCHIVED" : "ACTIVE";
+    const updated = await prisma.task.update({
+      where: { id: req.params.id },
+      data: { status: newStatus },
+    });
+    res.json({ ...updated, winningAmount: updated.winningAmount.toString(), status: updated.status });
+  } catch (err: unknown) {
+    logger.error("[bot/tasks toggle]", err);
+    res.status(500).json({ error: "Failed to change status" });
+  }
+});
+
+// ── DELETE /api/v1/bot/tasks/:id ──────────────────────────────────────────────
+botRouter.delete("/tasks/:id", async (req: Request, res: Response) => {
+  try {
+    // Delete completions first, then the task
+    await prisma.completedTask.deleteMany({ where: { taskId: req.params.id } });
+    await prisma.task.delete({ where: { id: req.params.id } });
+    res.json({ ok: true });
+  } catch (err: unknown) {
+    if ((err as Record<string,unknown>).code === "P2025") return res.status(404).json({ error: "Task not found" });
+    logger.error("[bot/tasks delete]", err);
+    res.status(500).json({ error: "Failed to delete task" });
+  }
+});
+
+// ── POST /api/v1/bot/cleanup/dead ─────────────────────────────────────────────
+botRouter.post("/cleanup/dead", async (_req: Request, res: Response) => {
+  try {
+    // Count before
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 30);
+    const beforeCount = await prisma.user.count({
+      where: { isBot: false, isBanned: false, referralActivated: false, createdAt: { lt: cutoff } },
+    });
+    await cleanDeadPlayers();
+    res.json({ removed: beforeCount });
+  } catch (err: unknown) {
+    logger.error("[bot/cleanup/dead]", err);
+    res.status(500).json({ error: "Failed to clean dead accounts" });
+  }
+});
+
+// ── POST /api/v1/bot/cleanup/sessions ─────────────────────────────────────────
+botRouter.post("/cleanup/sessions", async (_req: Request, res: Response) => {
+  try {
+    const now = new Date();
+    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+    const sixHoursAgo = new Date(now.getTime() - 6 * 60 * 60 * 1000);
+
+    // 1. Cancel WAITING sessions older than 1 hour — refund bets for BATTLE type
+    const stuckWaiting = await prisma.session.findMany({
+      where: { status: "WAITING_FOR_OPPONENT", createdAt: { lt: oneHourAgo } },
+      include: { sides: { select: { playerId: true, isBot: true } } },
+    });
+
+    let cancelledWaiting = 0;
+    let refundedBets = 0;
+    for (const session of stuckWaiting) {
+      if (session.type === "BATTLE" && session.bet) {
+        const humanSide = session.sides.find((s: Record<string,unknown>) => !s.isBot);
+        if (humanSide) {
+          // Возврат ставки — тип REFUND. Раньше писался BATTLE_WIN с флагом
+          // refund в meta: в отчётах это выглядело как выигрыш, которого не было.
+          await updateBalance(
+            humanSide.playerId,
+            session.bet,
+            TransactionType.REFUND,
+            { refund: true, sessionId: session.id },
+            { isEmission: false }
+          );
+          refundedBets++;
+        }
+      }
+      await prisma.session.update({
+        where: { id: session.id },
+        data: { status: "CANCELLED", finishedAt: now },
+      });
+      cancelledWaiting++;
+    }
+
+    // 2. Mark stuck IN_PROGRESS sessions (no activity > 6h) as DRAW
+    const stuckInProgress = await prisma.session.findMany({
+      where: { status: "IN_PROGRESS", updatedAt: { lt: sixHoursAgo } },
+      include: { sides: { select: { id: true } } },
+    });
+
+    let drawnStuck = 0;
+    for (const session of stuckInProgress) {
+      await prisma.session.update({
+        where: { id: session.id },
+        data: {
+          status: "DRAW",
+          finishedAt: now,
+          sides: { updateMany: { where: {}, data: { status: "DRAW" } } },
+        },
+      });
+      drawnStuck++;
+    }
+
+    res.json({ cancelledWaiting, drawnStuck, refundedBets });
+  } catch (err: unknown) {
+    logger.error("[bot/cleanup/sessions]", err);
+    res.status(500).json({ error: "Failed to clean sessions" });
+  }
+});
+
+// ── POST /api/v1/bot/restart ──────────────────────────────────────────────────
+// Graceful shutdown — Docker/compose автоматически рестартует контейнер
+botRouter.post("/restart", async (_req: Request, res: Response) => {
+  res.json({ ok: true, message: "Restart initiated" });
+  setTimeout(() => {
+    logger.info("[bot/restart] Graceful shutdown by admin command");
+    process.exit(0);
+  }, 500);
+});
+
+// ── GET /api/v1/bot/user-exists — N17: проверка существования пользователя ───
+botRouter.get("/user-exists", async (req: Request, res: Response) => {
+  try {
+    const { telegramId } = req.query as { telegramId?: string };
+    if (!telegramId) return res.status(400).json({ error: "telegramId required" });
+
+    const user = await prisma.user.findUnique({
+      where: { telegramId: String(telegramId) },
+      select: { id: true },
+    });
+
+    res.json({ exists: !!user });
+  } catch (err: unknown) {
+    logger.error("[bot/user-exists]", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+// ── POST /api/v1/bot/items/avatar — создать premium-аватар (A2) ─────────────
+// Используется FSM admin-командой /admin → Add Avatar в боте.
+// Принимает: name (str), description (str), priceCoins (int|str), imageUrl (str — S3 url или data:URI),
+//            rarity ('COMMON'|'RARE'|'EPIC'|'LEGENDARY').
+botRouter.post("/items/avatar", async (req: Request, res: Response) => {
+  try {
+    const { name, description, priceCoins, imageUrl, rarity } = req.body ?? {};
+    if (!name || !imageUrl || priceCoins == null) {
+      return res.status(400).json({ error: "Required fields: name, imageUrl, priceCoins" });
+    }
+    // A2 audit-fix: валидируем priceCoins ДО BigInt() — раньше любой невалидный
+    // ввод от админа (например 'abc') кидал SyntaxError из BigInt() → 500.
+    // Принимаем целое >=0 в строке или числе.
+    const priceStr = typeof priceCoins === "number" ? String(Math.floor(priceCoins)) : String(priceCoins).trim();
+    if (!/^\d+$/.test(priceStr)) {
+      return res.status(400).json({ error: "priceCoins must be a non-negative integer" });
+    }
+    const priceBig = BigInt(priceStr);
+    if (priceBig < 0n || priceBig > 10_000_000n) {
+      return res.status(400).json({ error: "priceCoins out of range (0 ≤ x ≤ 10_000_000)" });
+    }
+    const nameStr = String(name).trim();
+    if (nameStr.length === 0 || nameStr.length > 120) {
+      return res.status(400).json({ error: "name must be 1..120 chars" });
+    }
+    const imageStr = String(imageUrl).trim();
+    if (imageStr.length === 0 || imageStr.length > 4096) {
+      return res.status(400).json({ error: "imageUrl required (≤4096 chars)" });
+    }
+    const allowedRarity = ["COMMON", "RARE", "EPIC", "LEGENDARY"] as const;
+    const rar = (allowedRarity as readonly string[]).includes(rarity) ? rarity : "RARE";
+    const item = await prisma.item.create({
+      data: {
+        name: nameStr,
+        description: description ? String(description).slice(0, 500) : "Premium avatar (admin upload)",
+        type: "PREMIUM_AVATAR",
+        category: "PREMIUM",
+        rarity: rar,
+        priceCoins: priceBig,
+        sortOrder: 1000,
+        imageUrl: imageStr,
+        previewUrl: imageStr,
+        isActive: true,
+      },
+    });
+    res.json({ id: item.id, name: item.name, priceCoins: item.priceCoins.toString(), rarity: item.rarity });
+  } catch (err: unknown) {
+    logger.error("[bot/items/avatar]", err);
+    res.status(500).json({ error: "Failed to create avatar item" });
+  }
+});
+
+// ── GET /api/v1/bot/items/avatars — список premium-аватаров для управления ───
+botRouter.get("/items/avatars", async (_req: Request, res: Response) => {
+  try {
+    const items = await prisma.item.findMany({
+      where: { type: "PREMIUM_AVATAR" },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+      include: { _count: { select: { owners: true } } },
+    });
+    res.json({
+      items: items.map((i) => ({
+        id: i.id,
+        name: i.name,
+        rarity: i.rarity,
+        priceCoins: i.priceCoins.toString(),
+        isActive: i.isActive,
+        imageUrl: i.imageUrl,
+        owners: (i as unknown as { _count?: { owners?: number } })._count?.owners ?? 0,
+      })),
+    });
+  } catch (err: unknown) {
+    logger.error("[bot/items/avatars list]", err);
+    res.status(500).json({ error: "Failed to list avatars" });
+  }
+});
+
+// ── PATCH /api/v1/bot/items/avatar/:id — имя/цена/редкость/активность ────────
+botRouter.patch("/items/avatar/:id", async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { name, priceCoins, rarity, isActive } = req.body ?? {};
+    const exists = await prisma.item.findFirst({ where: { id, type: "PREMIUM_AVATAR" } });
+    if (!exists) return res.status(404).json({ error: "Avatar not found" });
+
+    const data: Record<string, unknown> = {};
+    if (name != null) {
+      const n = String(name).trim();
+      if (n.length === 0 || n.length > 120) return res.status(400).json({ error: "name must be 1..120 chars" });
+      data.name = n;
+    }
+    if (priceCoins != null) {
+      const p = String(priceCoins).trim();
+      if (!/^\d+$/.test(p)) return res.status(400).json({ error: "priceCoins must be a non-negative integer" });
+      const pb = BigInt(p);
+      if (pb < 0n || pb > 10_000_000n) return res.status(400).json({ error: "priceCoins out of range" });
+      data.priceCoins = pb;
+    }
+    if (rarity != null) {
+      const allowed = ["COMMON", "RARE", "EPIC", "LEGENDARY"];
+      if (!allowed.includes(rarity)) return res.status(400).json({ error: "invalid rarity" });
+      data.rarity = rarity;
+      data.category = (rarity === "EPIC" || rarity === "LEGENDARY") ? "PREMIUM" : "BASIC";
+    }
+    if (isActive != null) data.isActive = !!isActive;
+
+    const item = await prisma.item.update({ where: { id }, data });
+    res.json({ id: item.id, name: item.name, priceCoins: item.priceCoins.toString(), rarity: item.rarity, isActive: item.isActive });
+  } catch (err: unknown) {
+    logger.error("[bot/items/avatar patch]", err);
+    res.status(500).json({ error: "Failed to update avatar" });
+  }
+});
+
+// ── DELETE /api/v1/bot/items/avatar/:id — удалить (или деактивировать) ───────
+botRouter.delete("/items/avatar/:id", async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const item = await prisma.item.findFirst({
+      where: { id, type: "PREMIUM_AVATAR" },
+      include: { _count: { select: { owners: true } } },
+    });
+    if (!item) return res.status(404).json({ error: "Avatar not found" });
+    const owners = (item as unknown as { _count?: { owners?: number } })._count?.owners ?? 0;
+    if (owners > 0) {
+      // Куплен игроками — только деактивируем (не ломаем их инвентарь).
+      await prisma.item.update({ where: { id }, data: { isActive: false } });
+      return res.json({ deleted: false, deactivated: true, owners });
+    }
+    await prisma.item.delete({ where: { id } });
+    res.json({ deleted: true, deactivated: false });
+  } catch (err: unknown) {
+    logger.error("[bot/items/avatar delete]", err);
+    res.status(500).json({ error: "Failed to delete avatar" });
+  }
+});

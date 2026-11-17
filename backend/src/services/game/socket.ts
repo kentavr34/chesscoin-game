@@ -1,0 +1,1254 @@
+import { Server, Socket } from "socket.io";
+import { logger, logError } from "@/lib/logger";
+import { Chess } from "chess.js";
+import { SessionStatus, SessionType, TransactionType, SessionSideStatus } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
+import { redis } from "@/lib/redis";
+import { verifyAccessToken } from "@/services/auth";
+import config from "@/config";
+import {
+  createBotSession,
+  createBattleSession,
+  createFriendlySession,
+  joinBattleSession,
+  getActiveBattles,
+  getActiveLiveBattles,
+  cacheSession,
+} from "./session";
+import { finishSession } from "./finish";
+import { setTimer, switchTimer, stopAllTimers } from "./timer";
+import { formatSession, formatBattlesList } from "./format";
+
+// Счётчик зрителей: sessionId → Set<socketId>
+// Используем Set чтобы не было дублей при реконнекте
+const spectatorRooms = new Map<string, Set<string>>();
+
+// ── Telegram: автопост в канал при создании публичного батла ─────────────────
+const BOT_TOKEN = () => process.env.BOT_TOKEN ?? "";
+const CHANNEL_ID = () => process.env.TELEGRAM_CHANNEL_ID ?? "";
+const BOT_LINK = "https://t.me/chessgamecoin_bot";
+
+// ── Личное уведомление игроку в чат бота ─────────────────────────────────────
+async function sendTgToUser(
+  telegramId: string,
+  text: string,
+  url?: string,
+  urlLabel?: string,
+) {
+  if (!BOT_TOKEN() || !telegramId) return;
+  try {
+    const body: Record<string, unknown> = {
+      chat_id: telegramId,
+      text,
+      parse_mode: "HTML",
+    };
+    if (url && urlLabel) {
+      body.reply_markup = { inline_keyboard: [[{ text: urlLabel, url }]] };
+    }
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN()}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch { /* silent */ }
+}
+
+// Проверяем: находится ли пользователь сейчас в комнате игры (просматривает партию)
+function isUserInGameRoom(io: Server, sessionId: string, targetUserId: string): boolean {
+  const room = io.sockets.adapter.rooms.get(sessionId);
+  if (!room) return false;
+  for (const socketId of room) {
+    const s = io.sockets.sockets.get(socketId);
+    if ((s as any)?.data?.userId === targetUserId) return true;
+  }
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// КРИТИЧНО: эмитим персонализированный snapshot каждому сокету в комнате.
+// io.to(room).emit("game", formatted) транслирует ОДИН payload — у получателей
+// session.mySideId оказывается чужим, доска переворачивается и цвета путаются.
+// Этот хелпер для каждого сокета формирует свой formatSession(session, userId).
+// extraSession — payload который пойдёт зрителям/спектаторам (mySideId=null).
+// ─────────────────────────────────────────────────────────────────────────────
+async function emitGameToRoom(
+  io: Server,
+  sessionId: string,
+  session: any,
+  extras?:
+    | Record<string, unknown>
+    | ((userId: string | null) => Record<string, unknown> | Promise<Record<string, unknown> | undefined> | undefined),
+) {
+  const room = io.sockets.adapter.rooms.get(sessionId);
+  const apply = async (userId: string | null) => {
+    const base = formatSession(session, userId);
+    const ext = typeof extras === 'function' ? await extras(userId) : extras;
+    return ext ? { ...base, ...ext } : base;
+  };
+  if (room) {
+    for (const socketId of room) {
+      const s = io.sockets.sockets.get(socketId);
+      if (!s) continue;
+      const sUserId = (s as any)?.data?.userId ?? null;
+      s.emit("game", await apply(sUserId));
+    }
+  }
+  io.to(`spectate:${sessionId}`).emit("game", await apply(null));
+}
+
+async function postNewBattleToChannel(
+  creatorName: string,
+  bet: bigint,
+  durationSecs: number,
+  sessionCode: string,
+) {
+  if (!BOT_TOKEN() || !CHANNEL_ID()) return;
+  if (bet < 50_000n) return; // постим только батлы от 50к монет
+  try {
+    const mins = Math.round(durationSecs / 60);
+    const betFmt = (Number(bet) / 1_000_000).toFixed(bet % 1_000_000n === 0n ? 0 : 2);
+    const text =
+      `⚔️ <b>Новый публичный батл!</b>\n\n` +
+      `👤 Игрок: <b>${creatorName}</b>\n` +
+      `💰 Ставка: <b>${betFmt}M ᚙ</b>\n` +
+      `⏱ Время: <b>${mins} мин</b>\n\n` +
+      `🎯 Принять вызов → <a href="${BOT_LINK}?startapp=game_${sessionCode}">Войти в батл</a>`;
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN()}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: CHANNEL_ID(),
+        text,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [[{ text: "⚔️ Принять вызов", url: `${BOT_LINK}?startapp=game_${sessionCode}` }]],
+        },
+      }),
+    });
+  } catch { /* silent — не блокируем и��ру */ }
+}
+
+export const cleanupSpectators = (sessionId: string) => {
+  spectatorRooms.delete(sessionId);
+};
+import { updateBalance, canEmit } from "@/services/economy";
+import { payFromTreasury } from "@/services/treasury";
+
+interface SocketData {
+  userId: string;
+}
+
+type AuthSocket = Socket & { data: SocketData };
+
+// ─────────────────────────────────────────
+// Redis кэш для проверки пользователя (TTL 60 сек)
+// Избегаем DB-запроса на каждое socket-соединение
+// ─────────────────────────────────────────
+const USER_CACHE_TTL = 60;
+
+const getCachedUserStatus = async (userId: string): Promise<{ exists: boolean; isBanned: boolean } | null> => {
+  try {
+    const cached = await redis.get(`user:status:${userId}`);
+    if (cached) return JSON.parse(cached);
+  } catch {}
+  return null;
+};
+
+const setCachedUserStatus = async (userId: string, data: { exists: boolean; isBanned: boolean }) => {
+  try {
+    await redis.setex(`user:status:${userId}`, USER_CACHE_TTL, JSON.stringify(data));
+  } catch {}
+};
+
+const invalidateUserCache = async (userId: string) => {
+  try {
+    await redis.del(`user:status:${userId}`);
+  } catch {}
+};
+
+// ─────────────────────────────────────────
+// Auth middleware для Socket.io
+// ─────────────────────────────────────────
+export const setupSocketAuth = (io: Server) => {
+  io.use(async (socket, next) => {
+    try {
+      const token =
+        socket.handshake.auth.token ||
+        socket.handshake.headers.authorization?.slice(7);
+
+      if (!token) return next(new Error("No token"));
+
+      const userId = verifyAccessToken(token);
+
+      // Проверяем кэш прежде чем идти в БД
+      let userStatus = await getCachedUserStatus(userId);
+      if (!userStatus) {
+        const user = await prisma.user.findUnique({
+          where: { id: userId },
+          select: { id: true, isBanned: true },
+        });
+        userStatus = user ? { exists: true, isBanned: user.isBanned } : { exists: false, isBanned: false };
+        await setCachedUserStatus(userId, userStatus);
+      }
+
+      if (!userStatus.exists || userStatus.isBanned) return next(new Error("Unauthorized"));
+
+      socket.data.userId = userId;
+      next();
+    } catch {
+      next(new Error("Invalid token"));
+    }
+  });
+};
+
+// ─────────────────────────────────────────
+// Основной обработчик соединения
+// ─────────────────────────────────────────
+export const setupSocketHandlers = (io: Server) => {
+  setupSocketAuth(io);
+
+  io.on("connection", async (socket: AuthSocket) => {
+    const userId = socket.data.userId;
+    logger.debug(`[Socket] Connected: ${socket.id} [user: ${userId}]`);
+
+    // При подключении — только ID активных сессий (лёгкий запрос)
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        activeSessions: { select: { id: true } },
+      },
+    });
+
+    if (user?.activeSessions.length) {
+      for (const session of user.activeSessions) {
+        socket.join(session.id);
+        logger.debug(`[Socket] Rejoined session: ${session.id}`);
+      }
+    }
+
+    // ── Disconnect ──────────────────────────────────────
+    socket.on("disconnect", async () => {
+      logger.debug(`[Socket] Disconnected: ${socket.id} [user: ${userId}]`);
+    });
+
+    // ── Получить текущие активные сессии (reconnect) ────
+    socket.on("game:current", async (callback?: Function) => {
+      try {
+        const currentUser = await prisma.user.findUnique({
+          where: { id: userId },
+          select: {
+            activeSessions: {
+              select: {
+                id: true, fen: true, pgn: true, status: true, type: true,
+                currentSideId: true, winnerSideId: true, bet: true, botLevel: true,
+                isSurrender: true, duration: true, turnStartedAt: true,
+                startedAt: true, finishedAt: true, createdAt: true, code: true,
+                // Без этих полей военная партия не доходила до вкладки
+                // «Приватные»: формат подставлял isPrivate=false, фронт
+                // отбрасывал её фильтром, и игрок узнавал о своём бое только
+                // зайдя в страну и раскрыв список сражений (Кенан 01.08.2026).
+                isPrivate: true, sourceType: true, sourceRefId: true,
+                deadlineAt: true, acceptedByAll: true, shareToken: true,
+                sides: { include: { player: { select: { id: true, firstName: true, lastName: true, username: true, elo: true, avatar: true, avatarType: true, avatarGradient: true, league: true, countryMember: { select: { country: { select: { code: true } } } } } } } },
+              },
+            },
+          },
+        });
+
+        const sessionsRaw = currentUser?.activeSessions ?? [];
+        for (const s of sessionsRaw) {
+          try {
+            // PR-1: sourceType теперь в БД-поле Session.sourceType (default 'PUBLIC').
+            // Redis-fallback нужен только для legacy-сессий, у которых DB поле
+            // ещё PUBLIC, но реально это турнирная/военная партия (до миграции).
+            // После того как все pre-migration сессии истекут (~30 дней) — выпилить.
+            if (!(s as any).sourceType || (s as any).sourceType === 'PUBLIC') {
+              const sourceData = await redis.get(`session:source:${s.id}`);
+              if (sourceData) {
+                const parsed = JSON.parse(sourceData);
+                (s as any).sourceType = parsed.sourceType;
+                (s as any).sourceRefId = parsed.sourceMeta ?? parsed.sourceRefId;
+              }
+            }
+          } catch (e) {}
+        }
+
+        const sessions = sessionsRaw.map((s: Record<string,unknown>) =>
+          formatSession(s as unknown as import("@/types/db").SessionWithSides, userId)
+        );
+
+        if (callback) callback({ ok: true, sessions });
+        else socket.emit("game:current", sessions);
+      } catch (err: unknown) {
+        if (callback) callback({ ok: false, error: (err as Error).message });
+      }
+    });
+
+    // ── Создать игру с ботом ─────────────────────────────
+    socket.on(
+      "game:create:bot",
+      async (
+        data: { color: "white" | "black"; botLevel: number; timeSeconds?: number },
+        callback?: Function
+      ) => {
+        try {
+          const session = await createBotSession(userId, data.color, data.botLevel, data.timeSeconds ?? 600);
+          socket.join(session.id);
+          const formatted = formatSession(session, userId);
+
+          if (callback) callback({ ok: true, session: formatted });
+          socket.emit("game", formatted);
+
+          if (data.color === "black") {
+            setTimeout(async () => {
+              await makeBotMove(socket, io, session.id);
+            }, 500);
+          } else {
+            await setTimer(session.id);
+          }
+        } catch (err: unknown) {
+          if (callback) callback({ ok: false, error: (err as Error).message });
+        }
+      }
+    );
+
+    // ── Создать батл ─────────────────────────────────────
+    socket.on(
+      "game:create:battle",
+      async (
+        data: { color: "white" | "black"; duration: number; bet: string; isPrivate?: boolean },
+        callback?: Function
+      ) => {
+        try {
+          const session = await createBattleSession(
+            userId,
+            data.color,
+            data.duration,
+            BigInt(data.bet),
+            data.isPrivate ?? false
+          );
+          socket.join(session.id);
+          const formatted = formatSession(session, userId);
+
+          if (callback) callback({ ok: true, session: formatted });
+          socket.emit("game", formatted);
+
+          // T18: отправляем только добавленный батл (diff вместо полного списка)
+          if (!data.isPrivate) {
+            const newBattle = formatBattlesList([session], buildSpectatorCounts([session]))[0];
+            io.to("lobby").emit("battles:added", newBattle);
+            // Автопост в Telegram-канал для крупных публичных батлов
+            const creator = session.sides[0]?.player;
+            const creatorName = creator?.firstName ?? creator?.username ?? "Игрок";
+            postNewBattleToChannel(creatorName, BigInt(data.bet), data.duration, session.code ?? "").catch(() => {});
+          }
+        } catch (err: unknown) {
+          if (callback) callback({ ok: false, error: (err as Error).message });
+        }
+      }
+    );
+
+    // ── Быстрый поиск соперника (автоформирование публичных батлов) ────────
+    // MVP: ищем подходящий публичный WAITING батл с теми же параметрами,
+    // присоединяемся. Если не нашли — создаём свой публичный батл с рандом-цветом.
+    // Фидбэк Кенана 2026-04-22: «система автоматического формирования публичных батлов».
+    socket.on(
+      "matchmaking:quick",
+      async (
+        data: { duration: number; bet: string },
+        callback?: Function
+      ) => {
+        try {
+          const betBig = BigInt(data.bet);
+          // Ищем первый подходящий WAITING публичный батл, где я не являюсь создателем
+          const candidate = await prisma.session.findFirst({
+            where: {
+              type: SessionType.BATTLE,
+              status: SessionStatus.WAITING_FOR_OPPONENT,
+              isPrivate: false,
+              duration: data.duration,
+              bet: betBig,
+              sides: { none: { playerId: userId } },
+            },
+            orderBy: { createdAt: "asc" },
+            select: { id: true, code: true },
+          });
+
+          if (candidate?.code) {
+            // Нашли → джойнимся по стандартному флоу
+            const session = await joinBattleSession(userId, candidate.code);
+            socket.join(session.id);
+            const formatted = formatSession(session, userId);
+
+            if (callback) callback({ ok: true, matched: true, session: formatted });
+            await emitGameToRoom(io, session.id, session);
+            io.to(session.id).emit("game:started", { sessionId: session.id });
+
+            await setTimer(session.id);
+            io.to("lobby").emit("battles:removed", session.id);
+            io.to("lobby").emit("battles:live:added", formatSession(session, null));
+            return;
+          }
+
+          // Не нашли → создаём свой публичный батл со случайным цветом
+          const color: "white" | "black" = Math.random() < 0.5 ? "white" : "black";
+          const session = await createBattleSession(userId, color, data.duration, betBig, false);
+          socket.join(session.id);
+          const formatted = formatSession(session, userId);
+
+          if (callback) callback({ ok: true, matched: false, session: formatted });
+          socket.emit("game", formatted);
+
+          const newBattle = formatBattlesList([session], buildSpectatorCounts([session]))[0];
+          io.to("lobby").emit("battles:added", newBattle);
+        } catch (err: unknown) {
+          if (callback) callback({ ok: false, error: (err as Error).message });
+        }
+      }
+    );
+
+    // ── Присоединиться к батлу ───────────────────────────
+    socket.on(
+      "game:join",
+      async (data: { code: string }, callback?: Function) => {
+        try {
+          const session = await joinBattleSession(userId, data.code);
+          socket.join(session.id);
+          const formatted = formatSession(session, userId);
+
+          if (callback) callback({ ok: true, session: formatted });
+          await emitGameToRoom(io, session.id, session);
+          io.to(session.id).emit("game:started", { sessionId: session.id });
+
+          await setTimer(session.id);
+
+          // T18: diff — убираем батл из лобби (он начался)
+          io.to("lobby").emit("battles:removed", session.id);
+          // Живые батлы: добавляем в live-список для наблюдателей
+          io.to("lobby").emit("battles:live:added", formatSession(session, null));
+
+          // 🔔 Уведомление создателю батла: противник принял вызов
+          try {
+            const creatorSide = session.sides.find((s: Record<string, unknown>) => s.playerId !== userId);
+            if (creatorSide) {
+              const creator = await prisma.user.findUnique({
+                where: { id: String(creatorSide.playerId) },
+                select: { telegramId: true, firstName: true },
+              });
+              const joiner = session.sides.find((s: Record<string, unknown>) => s.playerId === userId);
+              const joinerName = (joiner as any)?.player?.firstName ?? "Противник";
+              if (creator?.telegramId) {
+                const mins = Math.round((session as any).duration / 60);
+                const betFmt = session.bet ? Number(session.bet) >= 1_000_000
+                  ? `${(Number(session.bet) / 1_000_000).toFixed(2)}M`
+                  : `${Math.round(Number(session.bet) / 1000)}K` : "0";
+                await sendTgToUser(
+                  creator.telegramId,
+                  `⚔️ <b>Батл начался!</b>\n\n👤 Принял: <b>${joinerName}</b>\n💰 Ставка: <b>${betFmt} ᚙ</b>\n⏱ Время: <b>${mins} мин</b>\n\n▶️ Открой игру и ходи!`,
+                  `${BOT_LINK}?start=game_${session.id}`,
+                  "▶️ Играть",
+                );
+              }
+            }
+          } catch { /* silent — уведомление не блокирует игру */ }
+        } catch (err: unknown) {
+          if (callback) callback({ ok: false, error: (err as Error).message });
+        }
+      }
+    );
+
+    // ── Принять приватный батл (Турнир / Война) ───────────────────────────
+    socket.on(
+      "game:accept_private",
+      async (data: { sessionId: string }, callback?: Function) => {
+        try {
+          const session = await prisma.session.findUnique({
+             where: { id: data.sessionId },
+             include: { sides: { include: { player: { select: { id: true, firstName: true, lastName: true, username: true, elo: true, avatar: true, avatarType: true, avatarGradient: true, league: true, countryMember: { select: { country: { select: { code: true } } } } } } } } }
+          });
+          
+          if (!session || session.status !== SessionStatus.WAITING_FOR_OPPONENT) throw new Error("SESSION_NOT_WAITING");
+          
+          const mySide = session.sides.find((s: Record<string,unknown>) => s.playerId === userId);
+          if (!mySide) throw new Error("NOT_YOUR_GAME");
+
+          let updatedSession = session;
+
+          // Обновляем статус моей стороны (если еще не Accepted)
+          if (mySide.status !== "IN_PROGRESS") {
+             await prisma.sessionSide.update({ where: { id: mySide.id }, data: { status: SessionSideStatus.IN_PROGRESS } });
+             
+             // Проверяем, приняли ли ОБА игрока
+             const updatedSides = await prisma.sessionSide.findMany({ where: { sessionId: data.sessionId } });
+             const bothAccepted = updatedSides.every(s => s.status === SessionSideStatus.IN_PROGRESS) && updatedSides.length === 2;
+
+             if (bothAccepted) {
+                // PR-1: "вылупляется" партия — оба приняли. Снимаем приватность
+                // (виден всем в публичных LIVE), помечаем acceptedByAll=true.
+                // sourceType сохраняется (WAR/TOURNAMENT) — это эмблема LIVE-карточки.
+                updatedSession = await prisma.session.update({
+                  where: { id: data.sessionId },
+                  data: {
+                     status: SessionStatus.IN_PROGRESS,
+                     startedAt: new Date(),
+                     isPrivate: false,
+                     acceptedByAll: true,
+                  },
+                  include: { sides: { include: { player: { select: { id: true, firstName: true, lastName: true, username: true, elo: true, avatar: true, avatarType: true, avatarGradient: true, league: true, countryMember: { select: { country: { select: { code: true } } } } } } } } }
+                });
+                
+                const whiteSide = updatedSession.sides.find((s: Record<string,unknown>) => s.isWhite);
+                updatedSession = await prisma.session.update({ 
+                  where: { id: data.sessionId }, 
+                  data: { currentSideId: whiteSide?.id },
+                  include: { sides: { include: { player: { select: { id: true, firstName: true, lastName: true, username: true, elo: true, avatar: true, avatarType: true, avatarGradient: true, league: true, countryMember: { select: { country: { select: { code: true } } } } } } } } }
+                });
+                
+                await setTimer(data.sessionId);
+                
+                io.to(data.sessionId).emit("game:started", { sessionId: data.sessionId });
+                
+                // PR-1: Redis fallback только если DB-поле пустое (legacy сессии)
+                try {
+                   if (!(updatedSession as any).sourceType || (updatedSession as any).sourceType === 'PUBLIC') {
+                     const sourceData = await redis.get(`session:source:${data.sessionId}`);
+                     if (sourceData) {
+                       const parsed = JSON.parse(sourceData);
+                       (updatedSession as any).sourceType = parsed.sourceType;
+                       (updatedSession as any).sourceRefId = parsed.sourceMeta ?? parsed.sourceRefId;
+                     }
+                   }
+                } catch (e) {}
+
+                const newBattle = formatBattlesList([updatedSession as any], buildSpectatorCounts([updatedSession]))[0];
+                io.to("lobby").emit("battles:added", newBattle);
+             } else {
+                updatedSession = await prisma.session.findUniqueOrThrow({
+                   where: { id: data.sessionId },
+                   include: { sides: { include: { player: { select: { id: true, firstName: true, lastName: true, username: true, elo: true, avatar: true, avatarType: true, avatarGradient: true, league: true, countryMember: { select: { country: { select: { code: true } } } } } } } } }
+                });
+             }
+          }
+
+          try {
+             if (!(updatedSession as any).sourceType || (updatedSession as any).sourceType === 'PUBLIC') {
+               const sourceData = await redis.get(`session:source:${data.sessionId}`);
+               if (sourceData) {
+                 const parsed = JSON.parse(sourceData);
+                 (updatedSession as any).sourceType = parsed.sourceType;
+                 (updatedSession as any).sourceRefId = parsed.sourceMeta ?? parsed.sourceRefId;
+               }
+             }
+          } catch (e) {}
+
+          socket.join(data.sessionId);
+          const formatted = formatSession(updatedSession as any, userId);
+          
+          if (callback) callback({ ok: true, session: formatted });
+          await emitGameToRoom(io, data.sessionId, updatedSession);
+
+        } catch (err: unknown) {
+          if (callback) callback({ ok: false, error: (err as Error).message });
+        }
+      }
+    );
+
+    // ── Сделать ход ──────────────────────────────────────
+    socket.on(
+      "game:move",
+      async (
+        data: { sessionId: string; from: string; to: string; promotion?: string },
+        callback?: Function
+      ) => {
+        try {
+          const { sessionId, from, to, promotion = "q" } = data;
+
+          // Distributed lock: предотвращает интерливинг ходов
+          const moveLock = `move:lock:${sessionId}`;
+          const acquired = await redis.set(moveLock, userId, "EX", 5, "NX");
+          if (!acquired) {
+            if (callback) callback({ ok: false, error: "MOVE_IN_PROGRESS" });
+            return;
+          }
+
+          try {
+
+          const session = await prisma.session.findUnique({
+            where: { id: sessionId },
+            select: {
+              id: true, fen: true, pgn: true, status: true, type: true,
+              currentSideId: true, bet: true, botLevel: true,
+              sides: { include: { player: { select: { id: true, firstName: true, lastName: true, username: true, elo: true, avatar: true, avatarType: true, avatarGradient: true, league: true, countryMember: { select: { country: { select: { code: true } } } } } } } },
+            },
+          });
+
+          if (!session || session.status !== SessionStatus.IN_PROGRESS) {
+            throw new Error("SESSION_NOT_ACTIVE");
+          }
+
+          const mySide = session.sides.find((s: Record<string,unknown>) => s.playerId === userId && !s.isBot);
+          if (!mySide) throw new Error("NOT_YOUR_GAME");
+          if (session.currentSideId !== mySide.id) throw new Error("NOT_YOUR_TURN");
+
+          // FIX #8: new Chess(fen) + loadPgn() конфликтуют — loadPgn сбрасывает FEN из конструктора.
+          // Если PGN не пустой — восстанавливаем состояние через него (он содержит полную историю).
+          // Если PGN пустой (начало партии) — используем FEN напрямую.
+          const chess = session.pgn
+            ? new Chess()
+            : new Chess(session.fen);
+          if (session.pgn) chess.loadPgn(session.pgn);
+
+          let moveResult;
+          try {
+            moveResult = chess.move({ from, to, promotion });
+          } catch {
+            throw new Error("INVALID_MOVE");
+          }
+
+          await prisma.session.update({
+            where: { id: sessionId },
+            data: { fen: chess.fen(), pgn: chess.pgn(), turnStartedAt: new Date() },
+          });
+
+          // Монеты за фигуры ТОЛЬКО при игре с ботом (MasterPlan §5.3)
+          if (moveResult.captured && session.type === SessionType.BOT) {
+            const emitAllowed = await canEmit();
+            if (emitAllowed) {
+              const piecePrice =
+                config.economy.piecePrice[moveResult.captured as keyof typeof config.economy.piecePrice] ?? 0n;
+              if (piecePrice > 0n) {
+                // За Джарвиса платим мы: монеты за съеденную фигуру уходят
+                // СО СЧЁТА ПЛАТФОРМЫ, а не появляются из ниоткуда. Раньше это
+                // была прямая дописка на баланс — единственный оставшийся
+                // источник печати монет: капитал разошёлся на 1800 за сутки
+                // (дефект 40, Кенан 01.08.2026: «война не должна генерировать
+                // монеты» — то же правило и для игры с ботом).
+                await payFromTreasury(userId, piecePrice, TransactionType.BOT_PIECE, {
+                  piece: moveResult.captured, sessionId,
+                });
+                // Трекинг монет за фигуры для отображения в модале результата
+                await redis.incrby(`session:${sessionId}:pieceCoins:${userId}`, Number(piecePrice));
+                await redis.expire(`session:${sessionId}:pieceCoins:${userId}`, 86400);
+              }
+            }
+          }
+
+          // Конец игры
+          if (chess.isGameOver()) {
+            const status = chess.isDraw() ? SessionStatus.DRAW : SessionStatus.FINISHED;
+            // mySide — тот, кто только что сделал ход. Если isGameOver() после его хода — он победил.
+            const opponentSide = session.sides.find(s => s.id !== mySide.id);
+            const finished = await finishSession(sessionId, status, {
+              winnerSideId: chess.isDraw() ? undefined : mySide.id,
+              loserSideId: chess.isDraw() ? undefined : opponentSide?.id,
+              isDraw: chess.isDraw() || chess.isStalemate(),
+            });
+            await stopAllTimers(sessionId);
+            // pieceCoins зависит от userId — каждому сокету свой extras
+            const myCoins = await redis.get(`session:${sessionId}:pieceCoins:${userId}`);
+            const formattedFinished = { ...formatSession(finished, userId), pieceCoins: myCoins ?? '0' };
+            await emitGameToRoom(io, sessionId, finished, async (sid: string | null) => {
+              const raw = sid ? await redis.get(`session:${sessionId}:pieceCoins:${sid}`) : null;
+              return { pieceCoins: raw ?? '0' };
+            });
+
+            if (session.type === SessionType.BOT) {
+              setTimeout(() => {
+                io.to(sessionId).emit("game:over", { status: finished.status });
+                cleanupSpectators(sessionId);
+              }, 3000);
+            } else {
+              io.to(sessionId).emit("game:over", { status: finished.status });
+              io.to("lobby").emit("battles:live:removed", sessionId);
+              cleanupSpectators(sessionId);
+            }
+
+            if (callback) callback({ ok: true, session: formattedFinished });
+            return;
+          }
+
+          // Переключаем ход
+          const nextSide = session.sides.find(s => s.id !== session.currentSideId);
+          await prisma.session.update({
+            where: { id: sessionId },
+            data: { currentSideId: nextSide?.id },
+          });
+
+          // Переключаем таймер для батлов и игр с ботом
+          if ((session.type === SessionType.BATTLE || session.type === SessionType.BOT) && nextSide) {
+            await switchTimer(sessionId, mySide.id, nextSide.id);
+          }
+
+          const updatedSession = await prisma.session.findUnique({
+            where: { id: sessionId },
+            include: { sides: { include: { player: { select: { id: true, firstName: true, lastName: true, username: true, elo: true, avatar: true, avatarType: true, avatarGradient: true, league: true, countryMember: { select: { country: { select: { code: true } } } } } } } } },
+          });
+
+          if (!updatedSession) {
+            logger.error("[Socket] Session not found after move:", sessionId);
+            if (callback) callback({ ok: false, error: "Session not found" });
+            return;
+          }
+
+          await cacheSession(updatedSession);
+          const formatted = formatSession(updatedSession, userId);
+          // КРИТИЧНО: персонализированный emit (иначе доска/цвета путаются)
+          await emitGameToRoom(io, sessionId, updatedSession);
+          if (callback) callback({ ok: true, session: formatted });
+
+          // 🔔 Уведомление сопернику о ходе — только если он НЕ в комнате игры
+          if (
+            session.type === SessionType.BATTLE &&
+            nextSide && !nextSide.isBot &&
+            !isUserInGameRoom(io, sessionId, nextSide.playerId)
+          ) {
+            try {
+              const opponent = await prisma.user.findUnique({
+                where: { id: nextSide.playerId },
+                select: { telegramId: true },
+              });
+              if (opponent?.telegramId) {
+                const moverName = mySide
+                  ? (session.sides.find((s: Record<string,unknown>) => s.id === mySide.id) as any)?.player?.firstName ?? "Противник"
+                  : "Противник";
+                await sendTgToUser(
+                  opponent.telegramId,
+                  `♟️ <b>${moverName}</b> сделал ход!\n\n⚡ Твой ход — не затягивай!`,
+                  `${BOT_LINK}?start=game_${sessionId}`,
+                  "▶️ Сделать ход",
+                );
+              }
+            } catch { /* silent */ }
+          }
+
+          // Ход бота
+          if (session.type === SessionType.BOT && nextSide?.isBot) {
+            setTimeout(async () => {
+              await makeBotMove(socket, io, sessionId);
+            }, 400 + Math.random() * 600);
+          }
+
+          } finally {
+            await redis.del(moveLock).catch(() => {});
+          }
+        } catch (err: unknown) {
+          if (callback) callback({ ok: false, error: (err as Error).message });
+        }
+      }
+    );
+
+    // ── Сдаться ──────────────────────────────────────────
+    socket.on(
+      "game:surrender",
+      async (data: { sessionId: string }, callback?: Function) => {
+        try {
+          const session = await prisma.session.findUnique({
+            where: { id: data.sessionId },
+            select: {
+              id: true, status: true, type: true, bet: true,
+              sides: { select: { id: true, playerId: true, isBot: true } },
+            },
+          });
+          if (!session || session.status !== SessionStatus.IN_PROGRESS) return;
+
+          const mySide = session.sides.find(s => s.playerId === userId);
+          const opponentSide = session.sides.find(s => s.playerId !== userId);
+          if (!mySide) return;
+
+          await stopAllTimers(data.sessionId);
+          const finished = await finishSession(data.sessionId, SessionStatus.FINISHED, {
+            winnerSideId: opponentSide?.id,
+            loserSideId: mySide.id,
+          });
+
+          await prisma.session.update({
+            where: { id: data.sessionId },
+            data: { isSurrender: true },
+          });
+
+          const formatted = formatSession(finished, userId);
+          void formatted;
+          await emitGameToRoom(io, data.sessionId, finished);
+          io.to(data.sessionId).emit("game:over", { status: "FINISHED", surrender: true });
+          cleanupSpectators(data.sessionId);
+          if (callback) callback({ ok: true });
+
+          if (session.type === SessionType.BATTLE) {
+            io.to("lobby").emit("battles:removed", data.sessionId);
+            io.to("lobby").emit("battles:live:removed", data.sessionId);
+          }
+        } catch (err: unknown) {
+          if (callback) callback({ ok: false, error: (err as Error).message });
+        }
+      }
+    );
+
+    // ── Отменить ожидающий батл ──────────────────────────
+    socket.on(
+      "game:cancel",
+      async (data: { sessionId: string }, callback?: Function) => {
+        try {
+          const session = await prisma.session.findUnique({
+            where: { id: data.sessionId },
+            select: {
+              id: true, status: true, type: true, bet: true,
+              sides: { select: { id: true, playerId: true } },
+            },
+          });
+
+          if (!session || session.status !== SessionStatus.WAITING_FOR_OPPONENT) {
+            throw new Error("Cannot cancel");
+          }
+          if (session.sides[0]?.playerId !== userId) {
+            throw new Error("Not your session");
+          }
+
+          if (session.type === SessionType.BATTLE && session.bet) {
+            // Возвращаем ставку
+            // Возврат ставки — тип REFUND. Раньше здесь стоял BATTLE_BET
+            // со знаком плюс: списание и возврат были неотличимы по типу,
+            // и экономику по типам транзакций собрать было нельзя.
+            await updateBalance(userId, session.bet, TransactionType.REFUND, {
+              reason: "battle_cancelled", sessionId: session.id,
+            });
+            // Возвращаем попытку (батл отменён до старта — попытка не должна сгорать)
+            const cancellingUser = await prisma.user.findUnique({
+              where: { id: userId },
+              select: { attempts: true, maxAttempts: true },
+            });
+            if (cancellingUser && cancellingUser.attempts < cancellingUser.maxAttempts) {
+              await prisma.user.update({
+                where: { id: userId },
+                data: { attempts: { increment: 1 } },
+              });
+            }
+          }
+
+          await prisma.session.update({
+            where: { id: data.sessionId },
+            data: { status: SessionStatus.CANCELLED },
+          });
+          await prisma.user.update({
+            where: { id: userId },
+            data: { activeSessions: { disconnect: { id: data.sessionId } } },
+          });
+
+          if (callback) callback({ ok: true });
+          // T18: diff — убираем отменённый батл
+          io.to("lobby").emit("battles:removed", data.sessionId);
+        } catch (err: unknown) {
+          if (callback) callback({ ok: false, error: (err as Error).message });
+        }
+      }
+    );
+
+    // ── Предложить / принять / отклонить ничью ───────────
+    socket.on("game:offer_draw", async (data: { sessionId: string }) => {
+      try {
+        await redis.setex(`draw:offered:${data.sessionId}`, 300, userId);
+        io.to(data.sessionId).emit("game:draw_offered", { by: userId });
+      } catch (err: unknown) {
+        logger.error("[Socket] game:offer_draw error:", (err as Error).message);
+      }
+    });
+
+    socket.on("game:accept_draw", async (data: { sessionId: string }, callback?: Function) => {
+      try {
+        const offeredBy = await redis.get(`draw:offered:${data.sessionId}`);
+        if (!offeredBy) {
+          if (callback) callback({ ok: false, error: "No draw offer pending" });
+          return;
+        }
+        if (offeredBy === userId) {
+          if (callback) callback({ ok: false, error: "Cannot accept own draw offer" });
+          return;
+        }
+        await redis.del(`draw:offered:${data.sessionId}`);
+        await stopAllTimers(data.sessionId);
+        const finished = await finishSession(data.sessionId, SessionStatus.DRAW, { isDraw: true });
+        await emitGameToRoom(io, data.sessionId, finished);
+        io.to(data.sessionId).emit("game:over", { status: "DRAW" });
+        cleanupSpectators(data.sessionId);
+        if (callback) callback({ ok: true });
+      } catch (err: unknown) {
+        logger.error("[Socket] game:accept_draw error:", (err as Error).message);
+        if (callback) callback({ ok: false, error: (err as Error).message });
+      }
+    });
+
+    socket.on("game:decline_draw", async (data: { sessionId: string }) => {
+      try {
+        await redis.del(`draw:offered:${data.sessionId}`);
+        io.to(data.sessionId).emit("game:draw_declined", { by: userId });
+      } catch (err: unknown) {
+        logger.error("[Socket] game:decline_draw error:", (err as Error).message);
+      }
+    });
+
+    // ── Спектатор ────────────────────────────────────────
+    socket.on("spectate", (data: { sessionId: string }) => {
+      socket.join(`spectate:${data.sessionId}`);
+      // Добавляем в счётчик зрителей
+      if (!spectatorRooms.has(data.sessionId)) spectatorRooms.set(data.sessionId, new Set());
+      spectatorRooms.get(data.sessionId)!.add(socket.id);
+    });
+
+    // 2026-05-16 Кенан: deep-link watch_<code> работает и для завершённых
+    // партий. Здесь просто резолвим code → session.id (без join — клиент
+    // потом сделает navigate /game/:id?spectate=1 и подгрузит).
+    socket.on("battles:by-code", async (data: { code: string }, callback?: Function) => {
+      try {
+        const session = await prisma.session.findFirst({
+          where: { code: data.code },
+          include: { sides: { include: { player: { select: { id: true, firstName: true, lastName: true, username: true, elo: true, avatar: true, avatarType: true, avatarGradient: true, league: true, countryMember: { select: { country: { select: { code: true } } } } } } } } },
+        });
+        if (!session) return callback?.({ ok: false, error: 'NOT_FOUND' });
+        callback?.({ ok: true, session: formatSession(session as any, socket.data.userId) });
+      } catch (e) {
+        callback?.({ ok: false, error: 'INTERNAL' });
+      }
+    });
+
+    socket.on("unspectate", (data: { sessionId: string }) => {
+      socket.leave(`spectate:${data.sessionId}`);
+      spectatorRooms.get(data.sessionId)?.delete(socket.id);
+    });
+
+    // Чистим зрителей при дисконнекте
+    socket.on("disconnect", () => {
+      spectatorRooms.forEach((set) => set.delete(socket.id));
+    });
+
+    // ── Лобби батлов ─────────────────────────────────────
+    // Хелпер: построить Map счётчиков зрителей для текущих батлов
+    const buildSpectatorCounts = (battles: Array<{ id: string }>) => {
+      const counts = new Map<string, number>();
+      for (const b of battles) {
+        counts.set(b.id, spectatorRooms.get(b.id)?.size ?? 0);
+      }
+      return counts;
+    };
+
+    socket.on("battles:subscribe", async () => {
+      try {
+        socket.join("lobby");
+        const [battles, liveBattles] = await Promise.all([
+          getActiveBattles(),
+          getActiveLiveBattles(),
+        ]);
+        socket.emit("battles:list", formatBattlesList(battles, buildSpectatorCounts(battles)));
+        socket.emit("battles:live:list", liveBattles.map((s) => formatSession(s, null)));
+      } catch (err: unknown) {
+        logger.error("[Socket] battles:subscribe error:", (err as Error).message);
+      }
+    });
+
+    socket.on("battles:unsubscribe", () => {
+      socket.leave("lobby");
+    });
+
+    // ── Донат зрителя в батл ─────────────────────────────
+    // PR-2: разрешён на WAITING_FOR_OPPONENT тоже (зритель может поддержать
+    // партию ещё до старта — пока оба не приняли). Опциональный sideId — за
+    // кого болеешь; top-donor по сторонам трекаем в Redis-leaderboard.
+    socket.on(
+      "battle:donate",
+      async (data: { sessionId: string; amount: string; sideId?: string }, callback?: Function) => {
+        try {
+          const session = await prisma.session.findUnique({
+            where: { id: data.sessionId },
+            select: { id: true, type: true, status: true, donationPool: true, sides: { select: { id: true, playerId: true } } },
+          });
+          if (!session || session.type !== SessionType.BATTLE) throw new Error("BATTLE_NOT_FOUND");
+          // PR-2: разрешаем донат на WAITING_FOR_OPPONENT и IN_PROGRESS.
+          if (session.status !== SessionStatus.IN_PROGRESS && session.status !== SessionStatus.WAITING_FOR_OPPONENT) {
+            throw new Error("BATTLE_NOT_FOUND");
+          }
+          // Защита от self-donate
+          if (session.sides.some(s => s.playerId === userId)) throw new Error("CANNOT_DONATE_OWN_BATTLE");
+          // Если sideId передан — проверяем что принадлежит этой сессии
+          if (data.sideId && !session.sides.some(s => s.id === data.sideId)) {
+            throw new Error("INVALID_SIDE");
+          }
+
+          const amountBig = BigInt(data.amount);
+          if (amountBig <= 0n) throw new Error("INVALID_AMOUNT");
+
+          const user = await prisma.user.findUnique({ where: { id: userId }, select: { balance: true } });
+          if (!user || user.balance < amountBig) throw new Error("INSUFFICIENT_BALANCE");
+
+          // Снимаем с баланса донора
+          await updateBalance(userId, -amountBig, TransactionType.BATTLE_DONATION, {
+            sessionId: data.sessionId, reason: "spectator_donation",
+          });
+
+          // Добавляем в пул доната сессии и сразу читаем актуальное значение
+          // FIX #7: раньше totalPool считался по устаревшему session.donationPool,
+          // что при параллельных донатах давало неверную сумму в событии
+          const updatedSession = await prisma.session.update({
+            where: { id: data.sessionId },
+            data: { donationPool: { increment: amountBig } },
+            select: { donationPool: true },
+          });
+
+          // PR-2: Redis-leaderboard «топ-донатор» по сторонам (для UI бейджа).
+          // Sorted set: ключ donors:<sessionId>:<sideId>, score=сумма, member=userId.
+          if (data.sideId) {
+            try {
+              await redis.zincrby(`donors:${data.sessionId}:${data.sideId}`, Number(amountBig), userId);
+              // TTL 30 дней (после финала всё равно архивная); +60 на буфер.
+              await redis.expire(`donors:${data.sessionId}:${data.sideId}`, 60 * 60 * 24 * 31);
+            } catch {}
+          }
+
+          // Уведомляем всех в комнате (+ spectate-room)
+          const payload = {
+            donorId: userId,
+            sideId: data.sideId ?? null,
+            amount: amountBig.toString(),
+            totalPool: updatedSession.donationPool.toString(),
+          };
+          io.to(data.sessionId).emit("battle:donated", payload);
+          io.to(`spectate:${data.sessionId}`).emit("battle:donated", payload);
+          if (callback) callback({ ok: true });
+        } catch (err: unknown) {
+          if (callback) callback({ ok: false, error: (err as Error).message });
+        }
+      }
+    );
+
+    // ── Браво от зрителя / игрока ────────────────────────
+    socket.on(
+      "battle:bravo",
+      (data: { sessionId: string; name: string }) => {
+        if (!data?.sessionId || !data?.name) return;
+        // Рассылаем всем участникам комнаты и зрителям
+        io.to(data.sessionId).emit("battle:bravo", { name: data.name });
+        io.to(`spectate:${data.sessionId}`).emit("battle:bravo", { name: data.name });
+      }
+    );
+
+    // ── Вызов игрока из клана ─────────────────────────────
+    socket.on(
+      "clan:challenge_player",
+      async (data: { targetUserId: string; bet: string }, callback?: Function) => {
+        try {
+          const bet = BigInt(data.bet);
+          if (bet <= 0n) throw new Error("INVALID_BET");
+          // Создаём приватный батл и отправляем ссылку целевому игроку
+          const session = await createBattleSession(userId, "white", 600, bet, true);
+          socket.join(session.id);
+          const formatted = formatSession(session, userId);
+          if (callback) callback({ ok: true, session: formatted });
+
+          // Уведомляем целевого игрока
+          io.emit(`user:${data.targetUserId}`, {
+            type: "battle:challenge",
+            from: userId,
+            sessionCode: session.code,
+            bet: bet.toString(),
+          });
+        } catch (err: unknown) {
+          if (callback) callback({ ok: false, error: (err as Error).message });
+        }
+      }
+    );
+
+    // ── Очередь для войн ──────────────────────────────
+    socket.on(
+      "war:queue_join",
+      async (data: { warId: string; countryId: string }, callback?: Function) => {
+        try {
+          await redis.sadd(`war:queue:${data.warId}:${data.countryId}`, userId);
+          // Auto expire key after 1 hour in case they get stuck
+          await redis.expire(`war:queue:${data.warId}:${data.countryId}`, 3600);
+          if (callback) callback({ ok: true });
+        } catch (err: unknown) {
+          if (callback) callback({ ok: false, error: (err as Error).message });
+        }
+      }
+    );
+
+    socket.on(
+      "war:queue_leave",
+      async (data: { warId: string; countryId: string }, callback?: Function) => {
+        try {
+          await redis.srem(`war:queue:${data.warId}:${data.countryId}`, userId);
+          if (callback) callback({ ok: true });
+        } catch (err: unknown) {
+          if (callback) callback({ ok: false, error: (err as Error).message });
+        }
+      }
+    );
+
+    // ── Ping ─────────────────────────────────────────────
+    socket.on("ping", () => socket.emit("pong"));
+  });
+};
+
+// ─────────────────────────────────────────
+// Ход бота (Stockfish или random fallback)
+// ─────────────────────────────────────────
+const makeBotMove = async (socket: AuthSocket, io: Server, sessionId: string) => {
+  try {
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: {
+        id: true, fen: true, pgn: true, status: true, botLevel: true, currentSideId: true,
+        sides: { include: { player: { select: { id: true, firstName: true, lastName: true, username: true, elo: true, avatar: true, avatarType: true, avatarGradient: true, league: true, countryMember: { select: { country: { select: { code: true } } } } } } } },
+      },
+    });
+    if (!session || session.status !== SessionStatus.IN_PROGRESS) return;
+
+    const botSide = session.sides.find(s => s.isBot);
+    if (!session.currentSideId || session.currentSideId !== botSide?.id) return;
+
+    // FIX #8: аналогично game:move — загружаем через PGN если он не пустой
+    const chess = session.pgn
+      ? new Chess()
+      : new Chess(session.fen);
+    if (session.pgn) chess.loadPgn(session.pgn);
+
+    const move = await getStockfishMove(chess.fen(), session.botLevel ?? 1);
+    if (!move) return;
+
+    let moveResult;
+    try {
+      moveResult = chess.move({ from: move.from, to: move.to, promotion: "q" });
+    } catch {
+      const moves = chess.moves({ verbose: true });
+      if (moves.length === 0) return;
+      moveResult = chess.move(moves[Math.floor(Math.random() * moves.length)]);
+    }
+
+    await prisma.session.update({
+      where: { id: sessionId },
+      data: { fen: chess.fen(), pgn: chess.pgn(), turnStartedAt: new Date() },
+    });
+
+    if (chess.isGameOver()) {
+      const humanSide = session.sides.find(s => !s.isBot);
+      const status = chess.isDraw() ? SessionStatus.DRAW : SessionStatus.FINISHED;
+      const finished = await finishSession(sessionId, status, {
+        winnerSideId: chess.isDraw() ? undefined : (chess.isCheckmate() ? botSide?.id : humanSide?.id),
+        loserSideId: chess.isDraw() ? undefined : (chess.isCheckmate() ? humanSide?.id : botSide?.id),
+        isDraw: chess.isDraw(),
+      });
+      await stopAllTimers(sessionId);
+      const uid = humanSide?.playerId ?? null;
+      // Включаем pieceCoins в данные для отображения в модале результата
+      const pieceCoinsRaw = uid ? await redis.get(`session:${sessionId}:pieceCoins:${uid}`) : null;
+      const formattedFinished = { ...formatSession(finished, uid), pieceCoins: pieceCoinsRaw ?? '0' };
+      // Бот-игры: персонализированный emit + pieceCoins по userId сокета
+      await emitGameToRoom(io, sessionId, finished, async (sid: string | null) => {
+        const raw = sid ? await redis.get(`session:${sessionId}:pieceCoins:${sid}`) : null;
+        return { pieceCoins: raw ?? '0' };
+      });
+      void formattedFinished;
+
+      setTimeout(() => {
+        io.to(sessionId).emit("game:over", { status: finished.status });
+        cleanupSpectators(sessionId);
+      }, 3000);
+      return;
+    }
+
+    const humanSide = session.sides.find(s => !s.isBot);
+    if (!humanSide) {
+      logger.error("[BotMove] No human side found in session:", sessionId);
+      return;
+    }
+
+    await prisma.session.update({
+      where: { id: sessionId },
+      data: { currentSideId: humanSide.id },
+    });
+
+    // Переключаем таймер обратно к человеку после хода бота
+    if (botSide) {
+      await switchTimer(sessionId, botSide.id, humanSide.id);
+    }
+
+    const updatedSession = await prisma.session.findUnique({
+      where: { id: sessionId },
+      include: { sides: { include: { player: { select: { id: true, firstName: true, lastName: true, username: true, elo: true, avatar: true, avatarType: true, avatarGradient: true, league: true, countryMember: { select: { country: { select: { code: true } } } } } } } } },
+    });
+
+    if (!updatedSession) {
+      logger.error("[BotMove] Session not found after update:", sessionId);
+      return;
+    }
+
+    await emitGameToRoom(io, sessionId, updatedSession);
+  } catch (err: unknown) {
+    logger.error("[BotMove] Error:", err);
+  }
+};
+
+// ─────────────────────────────────────────
+// Stockfish через нативный HTTP микросервис
+// Архитектура идентична v1.0.2:
+//   - Отдельный контейнер с нативным бинарником Stockfish
+//   - node-uci общается с ним через stdin/stdout нативного процесса
+//   - depth 10 за ~200-500ms (WASM было 8-15 секунд!)
+//   - Простой HTTP POST /move { fen, level } → { bestmove }
+// ─────────────────────────────────────────
+const STOCKFISH_URL = process.env.STOCKFISH_URL ?? "http://stockfish:3020";
+
+// Таймауты по уровням (с запасом: maxMovetime из server.js + 5 секунд)
+const LEVEL_TIMEOUTS = [
+  5000, 5000, 5000, 5000, 5000,   // 1-5:  50-500ms movetime + запас
+  7000, 7500, 8000, 8500, 8500,   // 6-10: 2000-3500ms movetime + запас
+  9000, 9500, 10000, 10500, 11000,// 11-15: 4000-6000ms + запас
+  9000, 10000, 11000, 12000, 13000,// 16-20: 4000-8000ms + запас
+];
+
+export const getStockfishMove = async (
+  fen: string,
+  level: number
+): Promise<{ from: string; to: string } | null> => {
+  const timeoutMs = LEVEL_TIMEOUTS[Math.max(0, Math.min(19, level - 1))];
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    const res = await fetch(`${STOCKFISH_URL}/move`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fen, level }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const data = await res.json() as { bestmove?: string };
+    const bestmove = data.bestmove;
+
+    if (!bestmove || bestmove === "(none)") return getRandomMove(fen);
+
+    const from = bestmove.slice(0, 2);
+    const to   = bestmove.slice(2, 4);
+    if (!/^[a-h][1-8]$/.test(from) || !/^[a-h][1-8]$/.test(to)) return getRandomMove(fen);
+
+    return { from, to };
+
+  } catch (err: unknown) {
+    logger.warn("[JARVIS] Stockfish HTTP error:", err instanceof Error ? err.message : String(err), "→ random fallback");
+    return getRandomMove(fen);
+  }
+};
+
+const getRandomMove = (fen: string): { from: string; to: string } | null => {
+  try {
+    const chess = new Chess(fen);
+    const moves = chess.moves({ verbose: true });
+    if (moves.length === 0) return null;
+    const move = moves[Math.floor(Math.random() * moves.length)];
+    return { from: move.from, to: move.to };
+  } catch {
+    return null;
+  }
+};

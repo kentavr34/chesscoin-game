@@ -1,0 +1,947 @@
+import { Router, Request, Response } from "express";
+import { z } from "zod";
+import { logger, logError } from "@/lib/logger";
+import { validate } from "@/middleware/validate"; // R4
+import multer from "multer";
+import { prisma } from "@/lib/prisma";
+import { redis } from "@/lib/redis";
+import config from "@/config";
+import { authMiddleware, AuthRequest } from "@/middleware/auth";
+import { uploadToS3, deleteFromS3 } from "@/lib/s3";
+import { updateBalance } from "@/services/economy";
+import { TransactionType } from "@prisma/client";
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith("image/")) cb(null, true);
+    else cb(new Error("Only image files are allowed"));
+  },
+});
+
+const router = Router();
+
+// R4: Additional schemas
+const WalletSchema = z.object({
+  walletAddress: z.string().min(10).max(100),
+});
+const ThemeSchema = z.object({
+  theme: z.string().min(1).max(50),
+});
+
+
+// R4: Additional schemas
+
+
+
+// ВАЖНО: /transactions и /referrals ДОЛЖНЫ быть ДО /:userId
+// иначе Express поймает слово "transactions" как userId
+
+// GET /profile/games — история завершённых партий
+// PR-2: фильтр ?source=BATTLE|WAR|TOURNAMENT — для архива батлов с вкладками.
+// BATTLE = PRIVATE/PUBLIC (обычные вызовы), WAR = WAR, TOURNAMENT = TOURNAMENT.
+router.get("/games", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).userId;
+    const { limit, offset, source } = z.object({
+      limit:  z.coerce.number().min(1).max(50).default(20),
+      offset: z.coerce.number().min(0).default(0),
+      source: z.enum(["BATTLE", "WAR", "TOURNAMENT"]).optional(),
+    }).parse(req.query);
+
+    const sourceFilter = source === "BATTLE"
+      ? { sourceType: { in: ["PRIVATE", "PUBLIC"] as any } }
+      : source === "WAR"
+      ? { sourceType: "WAR" as any }
+      : source === "TOURNAMENT"
+      ? { sourceType: "TOURNAMENT" as any }
+      : {};
+
+    const sessionWhere: any = {
+      status: { in: ["FINISHED", "DRAW", "TIME_EXPIRED"] },
+      ...sourceFilter,
+    };
+
+    const sides = await prisma.sessionSide.findMany({
+      where: {
+        playerId: userId,
+        isBot: false,
+        session: sessionWhere,
+      },
+      orderBy: { updatedAt: "desc" },
+      take: limit,
+      skip: offset,
+      select: {
+        id: true,
+        status: true,
+        isWhite: true,
+        winningAmount: true,
+        session: {
+          select: {
+            id: true,
+            type: true,
+            status: true,
+            pgn: true,
+            botLevel: true,
+            bet: true,
+            duration: true,
+            startedAt: true,
+            finishedAt: true,
+            // PR-2: source + shareToken для архивной карточки и deep-link.
+            sourceType: true,
+            sourceRefId: true,
+            shareToken: true,
+            sides: {
+              select: {
+                isBot: true,
+                isWhite: true,
+                status: true,
+                player: { select: { id: true, firstName: true, lastName: true, username: true, avatar: true, avatarGradient: true, avatarType: true } },
+              },
+            },
+          } as any,
+        },
+      },
+    });
+
+    const total = await prisma.sessionSide.count({
+      where: {
+        playerId: userId,
+        isBot: false,
+        session: sessionWhere,
+      },
+    });
+
+    const games = sides.map(side => {
+      const session = side.session as any;
+      const opponent = session.sides.find((s: any) => s.player.id !== userId && !s.isBot);
+      const botSide = session.sides.find((s: any) => s.isBot);
+      return {
+        sessionId: session.id,
+        type: session.type,
+        result: side.status, // WON / LOST / DRAW
+        isWhite: side.isWhite,
+        winningAmount: side.winningAmount?.toString() ?? null,
+        bet: session.bet?.toString() ?? null,
+        botLevel: session.botLevel,
+        pgn: session.pgn,
+        duration: session.duration,
+        startedAt: session.startedAt,
+        finishedAt: session.finishedAt,
+        // PR-2: для архивной карточки и deep-link
+        sourceType: session.sourceType ?? null,
+        sourceRefId: session.sourceRefId ?? null,
+        shareToken: session.shareToken ?? null,
+        opponent: opponent ? {
+          id: opponent.player.id,
+          firstName: opponent.player.firstName,
+          lastName: opponent.player.lastName,
+          username: opponent.player.username,
+          avatar: opponent.player.avatar,
+          avatarGradient: opponent.player.avatarGradient,
+          avatarType: opponent.player.avatarType,
+        } : null,
+        hasBot: !!botSide,
+      };
+    });
+
+    res.json({ total, games });
+  } catch (err: unknown) {
+    res.status(500).json({ error: (err instanceof Error ? err.message : String(err)) });
+  }
+});
+
+// GET /profile/transactions — история транзакций
+router.get("/transactions", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).userId;
+    const { limit, offset } = z.object({
+      limit:  z.coerce.number().min(1).max(100).default(20),
+      offset: z.coerce.number().min(0).default(0),
+    }).parse(req.query);
+
+    const [transactions, total] = await Promise.all([
+      prisma.transaction.findMany({
+        where: { userId },
+        orderBy: { createdAt: "desc" },
+        take: limit,
+        skip: offset,
+      }),
+      prisma.transaction.count({ where: { userId } }),
+    ]);
+
+    res.json({
+      total,
+      transactions: transactions.map(tx => ({
+        ...tx,
+        amount: tx.amount.toString(),
+      })),
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ error: (err instanceof Error ? err.message : String(err)) });
+  }
+});
+
+// GET /profile/referrals — реферальная информация (cursor-based pagination)
+router.get("/referrals", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).userId;
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 20, 1), 100);
+    const cursor = req.query.cursor as string | undefined;
+    const sort = (req.query.sort as string) === "coins" ? "coins" : "time";
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        telegramId: true,
+        referrerIncome: true,
+        subReferrerIncome: true,
+      },
+    });
+
+    if (!user) return res.status(404).json({ error: "Not found" });
+
+    // Build cursor-based where/orderBy for referrals query
+    const baseWhere: Record<string, unknown> = { referrerId: userId };
+
+    if (sort === "coins") {
+      // Composite cursor: `${balance}_${id}`
+      if (cursor) {
+        const sepIdx = cursor.lastIndexOf("_");
+        const cursorBalance = BigInt(cursor.substring(0, sepIdx));
+        const cursorId = cursor.substring(sepIdx + 1);
+        baseWhere.OR = [
+          { balance: { lt: cursorBalance } },
+          { balance: cursorBalance, id: { gt: cursorId } },
+        ];
+      }
+    } else {
+      // sort by time — cursor is ISO date string
+      if (cursor) {
+        baseWhere.createdAt = { lt: new Date(cursor) };
+      }
+    }
+
+    const orderBy =
+      sort === "coins"
+        ? [{ balance: "desc" as const }, { id: "asc" as const }]
+        : [{ createdAt: "desc" as const }];
+
+    const referrals = await prisma.user.findMany({
+      where: baseWhere,
+      select: {
+        id: true, firstName: true, lastName: true,
+        avatar: true, avatarGradient: true,
+        referralActivated: true, elo: true,
+        balance: true, createdAt: true,
+      },
+      orderBy,
+      take: limit + 1,
+    });
+
+    const hasMore = referrals.length > limit;
+    if (hasMore) referrals.pop();
+
+    // Compute next cursor
+    let nextCursor: string | null = null;
+    if (hasMore && referrals.length > 0) {
+      const last = referrals[referrals.length - 1];
+      nextCursor =
+        sort === "coins"
+          ? `${last.balance.toString()}_${last.id}`
+          : last.createdAt.toISOString();
+    }
+
+    // Aggregate counts (lightweight — count only, no data)
+    const [totalCount, activeCount] = await Promise.all([
+      prisma.user.count({ where: { referrerId: userId } }),
+      prisma.user.count({ where: { referrerId: userId, referralActivated: true } }),
+    ]);
+
+    const totalIncome = user.referrerIncome + user.subReferrerIncome;
+
+    res.json({
+      total: totalCount,
+      active: activeCount,
+      totalIncome: totalIncome.toString(),
+      level1Income: user.referrerIncome.toString(),
+      level2Income: user.subReferrerIncome.toString(),
+      refLink: `https://t.me/chessgamecoin_bot?start=ref_${user.telegramId}`,
+      referrals,
+      cursor: nextCursor,
+      hasMore,
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ error: (err instanceof Error ? err.message : String(err)) });
+  }
+});
+
+// POST /profile/ton-wallet — подключить TON кошелёк
+router.post("/ton-wallet", authMiddleware, validate(WalletSchema), async (req: Request, res: Response) => { // R4
+  try {
+    const userId = (req as AuthRequest).userId;
+    const { walletAddress } = req.body;
+    if (!walletAddress || typeof walletAddress !== 'string' || walletAddress.length < 20) {
+      return res.status(400).json({ error: "Invalid wallet address" });
+    }
+    // Check wallet not already linked to another account
+    const existing = await prisma.user.findFirst({
+      where: { tonWalletAddress: walletAddress, id: { not: userId } },
+      select: { id: true },
+    });
+    if (existing) {
+      return res.status(409).json({ error: "This wallet is already linked to another account" });
+    }
+
+    // Правило Кенана 31.07.2026: плата за подключение — единоразовая и
+    // привязана к АДРЕСУ. Этот адрес уже подтверждён — пускаем бесплатно,
+    // сколько бы раз человек ни переподключался. Новый адрес — новое
+    // подтверждение и новая оплата, он идёт через /ton-wallet/verify.
+    const confirmed = await prisma.tonWalletConfirmation.findUnique({
+      where: { userId_walletAddress: { userId, walletAddress } },
+      select: { confirmedAt: true },
+    });
+    if (!confirmed) {
+      return res.status(402).json({
+        error: "WALLET_NOT_CONFIRMED",
+        walletAddress,
+        priceTon: WALLET_UNLOCK_TON,
+        message: `Этот кошелёк ещё не подтверждён. Подтверждение — ${WALLET_UNLOCK_TON} TON, один раз за адрес. Дальше он будет подключаться бесплатно.`,
+      });
+    }
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: { tonWalletAddress: walletAddress, tonConnectedAt: new Date() },
+    });
+    // Сбрасываем кеш /auth/me: он живёт 30 секунд, и без сброса биржа ещё
+    // полминуты считала бы, что кошелька нет.
+    await redis.del(`user:me:${userId}`).catch(() => {});
+    res.json({ success: true, walletAddress, alreadyConfirmed: true });
+  } catch (err: unknown) {
+    res.status(500).json({ error: (err instanceof Error ? err.message : String(err)) });
+  }
+});
+
+// DELETE /profile/ton-wallet — отвязать TON кошелёк
+router.delete("/ton-wallet", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).userId;
+    await prisma.user.update({
+      where: { id: userId },
+      data: { tonWalletAddress: null, tonConnectedAt: null },
+    });
+    res.json({ success: true });
+  } catch (err: unknown) {
+    res.status(500).json({ error: (err instanceof Error ? err.message : String(err)) });
+  }
+});
+
+
+// POST /profile/ton-wallet/verify — верифицировать платёж 1 TON и подключить кошелёк
+// Принимает: { walletAddress, boc }
+// boc — base64 BOC транзакции из TonConnect
+router.post("/ton-wallet/verify", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).userId;
+    const { walletAddress, boc } = req.body;
+
+    if (!walletAddress || typeof walletAddress !== "string" || walletAddress.length < 20) {
+      return res.status(400).json({ error: "Invalid wallet address" });
+    }
+    if (!boc || typeof boc !== "string") {
+      return res.status(400).json({ error: "Missing transaction confirmation" });
+    }
+
+    // Проверяем что кошелёк не привязан к другому аккаунту
+    const existing = await prisma.user.findFirst({
+      where: { tonWalletAddress: walletAddress, id: { not: userId } },
+      select: { id: true },
+    });
+    if (existing) {
+      return res.status(409).json({ error: "This wallet is already linked to another account" });
+    }
+
+    // Раньше здесь стоял запрет «кошелёк уже подключён». Он мешал главному:
+    // по правилу Кенана 31.07.2026 привязать ДРУГОЙ адрес можно, просто это
+    // ещё одно подтверждение за 1 TON. Проверяем не факт подключения, а факт
+    // подтверждения именно этого адреса.
+    const already = await prisma.tonWalletConfirmation.findUnique({
+      where: { userId_walletAddress: { userId, walletAddress } },
+      select: { confirmedAt: true },
+    });
+    if (already) {
+      // Платить второй раз за тот же адрес не нужно — просто подключаем.
+      await prisma.user.update({
+        where: { id: userId },
+        data: { tonWalletAddress: walletAddress, tonConnectedAt: new Date() },
+      });
+      await redis.del(`user:me:${userId}`).catch(() => {});
+      return res.json({ success: true, walletAddress, alreadyConfirmed: true });
+    }
+
+    // Верификация транзакции через TON Center API
+    const platformWallet = config.ton.platformWallet;
+    if (platformWallet) {
+      const verified = await verifyTonPayment(walletAddress, platformWallet, boc);
+      if (!verified) {
+        return res.status(402).json({ error: "1 TON payment not confirmed. Try again in 30 seconds." });
+      }
+    } else if (process.env.NODE_ENV === "production") {
+      // Раньше здесь просто писали warn и шли дальше: на проде это означало
+      // бесплатную разблокировку кошелька для всех.
+      logger.error("[TON] PLATFORM_TON_WALLET не задан — разблокировка запрещена");
+      return res.status(503).json({ error: "TON verification unavailable" });
+    } else {
+      logger.warn("[TON] PLATFORM_TON_WALLET не задан — верификация пропущена (dev mode)");
+    }
+
+    // Записываем подтверждение АДРЕСА: с этого момента он подключается
+    // бесплатно навсегда, сколько бы раз человек ни переподключался.
+    await prisma.tonWalletConfirmation.create({
+      data: { userId, walletAddress, txHash: boc.slice(0, 64) },
+    }).catch(() => {}); // гонка двойного клика — подтверждение уже есть
+
+    // Сохраняем кошелёк
+    await prisma.user.update({
+      where: { id: userId },
+      data: { tonWalletAddress: walletAddress, tonConnectedAt: new Date() },
+    });
+    await redis.del(`user:me:${userId}`).catch(() => {});
+
+    // Логируем TON транзакцию
+    await prisma.tonTransaction.create({
+      data: {
+        userId,
+        type: "VERIFICATION",
+        amountTon: 1.0,
+        amountCoins: 0n,
+        txHash: boc.slice(0, 64),
+        status: "COMPLETED",
+        processedAt: new Date(),
+      },
+    }).catch(() => {}); // не критично
+
+    // B.1 MASTER_PLAN: транзакция в истории профиля пользователя.
+    // balance не меняем (платёж был в TON, не в монетах) — нужна нулевая
+    // транзакция для отметки события в истории.
+    await updateBalance(userId, 0n, TransactionType.WALLET_UNLOCK, {
+      walletAddress, boc: boc.slice(0, 64), tonAmount: 1.0,
+    }).catch(err => logError("[TON] WALLET_UNLOCK log fail", err));
+
+    logger.info(`[TON] Wallet verified for user ${userId}: ${walletAddress}`);
+    res.json({ success: true, walletAddress });
+  } catch (err: unknown) {
+    res.status(500).json({ error: (err instanceof Error ? err.message : String(err)) });
+  }
+});
+
+
+// ── Канон B1: 1 TON единоразово за подключение кошелька ───────────────────────
+// POST /ton-wallet сохраняет адрес без оплаты (нужен фронту после TonConnect),
+// поэтому сам факт наличия адреса ничего не разрешает. Денежные операции
+// требуют ОПЛАЧЕННОЙ разблокировки — транзакции WALLET_UNLOCK.
+// Кошельки, привязанные до введения платы, перенесены в таблицу подтверждений
+// самой миграцией — отдельная дата-граница в коде больше не нужна.
+
+// Курс монеты (Кенан 31.07.2026): 100 000 монет = 1 TON. Раньше был
+// миллион, и число было продублировано в трёх местах — при правке одного
+// курс разъезжался. Теперь одно объявление на весь файл.
+const COINS_PER_TON = 100_000;
+
+// Разовая плата за подтверждение одного адреса кошелька (Кенан 31.07.2026).
+const WALLET_UNLOCK_TON = 1;
+
+async function isWalletUnlocked(userId: string): Promise<boolean> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { tonWalletAddress: true },
+  });
+  if (!user?.tonWalletAddress) return false;
+  // Разрешение привязано к КОНКРЕТНОМУ адресу. Проверять «была ли когда-то
+  // оплата» нельзя: оплатив один кошелёк, человек привязал бы любой другой
+  // и пользовался им бесплатно.
+  const confirmed = await prisma.tonWalletConfirmation.findUnique({
+    where: { userId_walletAddress: { userId, walletAddress: user.tonWalletAddress } },
+    select: { id: true },
+  });
+  return Boolean(confirmed);
+}
+
+// ── Хелпер: поиск входящего TON-платежа через toncenter.com ───────────────────
+// Возвращает саму транзакцию, а не «да/нет»: вызывающему нужны и фактическая
+// сумма (начислять по блокчейну, а не по числу из запроса), и идентификатор
+// транзакции (чтобы один платёж нельзя было предъявить дважды).
+type TonPayment = { hash: string; lt: string; valueNano: bigint; utime: number };
+
+async function findTonPayment(
+  fromWallet: string,
+  toWallet: string,
+  minAmountNano: bigint,
+  windowSec = 600
+): Promise<TonPayment | null> {
+  try {
+    const network = config.ton.network;
+    const apiBase = network === "testnet"
+      ? "https://testnet.toncenter.com/api/v2"
+      : "https://toncenter.com/api/v2";
+    const apiKey = config.ton.toncenterApiKey;
+
+    const url = `${apiBase}/getTransactions?address=${encodeURIComponent(toWallet)}&limit=20${apiKey ? `&api_key=${apiKey}` : ""}`;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    if (!resp.ok) {
+      logger.warn(`[TON verify] toncenter returned ${resp.status}`);
+      return null;
+    }
+    const data = await resp.json() as { ok: boolean; result: Array<Record<string, unknown>> };
+    if (!data.ok || !Array.isArray(data.result)) return null;
+
+    const since = Math.floor(Date.now() / 1000) - windowSec;
+
+    for (const tx of data.result) {
+      const utime = tx.utime as number;
+      if (utime < since) break; // отсортированы по времени, новые первые
+
+      const inMsg = tx.in_msg as Record<string, unknown> | undefined;
+      if (!inMsg) continue;
+
+      const srcAddr = (inMsg.source as string | undefined) ?? "";
+      const value = BigInt((inMsg.value as string | number | undefined) ?? "0");
+      const srcNorm = srcAddr.replace(/^0:/, "UQ").toLowerCase();
+      const fromNorm = fromWallet.toLowerCase();
+
+      if ((srcAddr === fromWallet || srcNorm.includes(fromNorm.slice(2, 10))) && value >= minAmountNano) {
+        const txId = tx.transaction_id as Record<string, unknown> | undefined;
+        const hash = String(txId?.hash ?? (inMsg.body_hash as string | undefined) ?? `${utime}:${value}`);
+        const lt = String(txId?.lt ?? utime);
+        logger.info(`[TON verify] ✅ Платёж найден: ${value} nTON от ${srcAddr}, tx ${hash.slice(0, 16)}`);
+        return { hash, lt, valueNano: value, utime };
+      }
+    }
+
+    logger.warn(`[TON verify] Платёж не найден: ${fromWallet} → ${toWallet}`);
+    return null;
+  } catch (err) {
+    logError("[TON verify]", err);
+    return null;
+  }
+}
+
+// ── Хелпер: верификация TON платежа через toncenter.com ───────────────────────
+async function verifyTonPayment(
+  fromWallet: string,
+  toWallet: string,
+  boc: string,
+  minAmountNano = 900_000_000n // 0.9 TON (с учётом газа)
+): Promise<boolean> {
+  try {
+    const network = config.ton.network;
+    const apiBase = network === "testnet"
+      ? "https://testnet.toncenter.com/api/v2"
+      : "https://toncenter.com/api/v2";
+    const apiKey = config.ton.toncenterApiKey;
+
+    // Шаг 1: из BOC получаем hash транзакции
+    // BOC — это base64, его hash служит идентификатором
+    // Ищем входящие транзакции на кошелёк платформы от fromWallet
+    const url = `${apiBase}/getTransactions?address=${encodeURIComponent(toWallet)}&limit=20${apiKey ? `&api_key=${apiKey}` : ""}`;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    if (!resp.ok) {
+      logger.warn(`[TON verify] toncenter returned ${resp.status}`);
+      return false;
+    }
+    const data = await resp.json() as { ok: boolean; result: Array<Record<string, unknown>> };
+    if (!data.ok || !Array.isArray(data.result)) return false;
+
+    // Ищем транзакцию от нашего отправителя за последние 10 минут
+    const tenMinutesAgo = Math.floor(Date.now() / 1000) - 600;
+
+    for (const tx of data.result) {
+      const utime = tx.utime as number;
+      if (utime < tenMinutesAgo) break; // транзакции отсортированы по времени, новые первые
+
+      const inMsg = tx.in_msg as Record<string, unknown> | undefined;
+      if (!inMsg) continue;
+
+      const srcAddr = (inMsg.source as string | undefined) ?? "";
+      const value = BigInt((inMsg.value as string | number | undefined) ?? "0");
+
+      // Проверяем: от нашего кошелька, на нужную сумму
+      const srcNorm = srcAddr.replace(/^0:/, "UQ").toLowerCase();
+      const fromNorm = fromWallet.toLowerCase();
+
+      if ((srcAddr === fromWallet || srcNorm.includes(fromNorm.slice(2, 10))) && value >= minAmountNano) {
+        logger.info(`[TON verify] ✅ Found payment: ${value} nTON from ${srcAddr} at ${utime}`);
+        return true;
+      }
+    }
+
+    logger.warn(`[TON verify] Payment not found from ${fromWallet} to ${toWallet}`);
+    return false;
+  } catch (err) {
+    logError("[TON verify]", err);
+    return false;
+  }
+}
+
+// POST /profile/ton/withdraw — запрос на вывод (создаёт WithdrawalRequest)
+router.post("/ton/withdraw", authMiddleware, async (_req, res: Response) => {
+  // ЗАКРЫТО (Кенан 03.08.2026). Правило: «у нас нет пока выведения ничего
+  // вообще», «крипта из биржи должна идти на наш криптокошелёк и никак не
+  // обратно». Путь оставался живым и уносил монеты из капитала: они
+  // списывались с баланса и никуда не зачислялись. Продать монеты можно
+  // другому игроку через стакан на бирже — монеты остаются внутри системы.
+  res.status(403).json({
+    error: "WITHDRAWALS_CLOSED",
+    message: "Вывод монет за TON закрыт. Продать монеты можно на бирже другому игроку.",
+  });
+});
+
+// POST /profile/theme — сохранить активную тему
+router.post("/theme", authMiddleware, validate(ThemeSchema), async (req: Request, res: Response) => { // R4
+  try {
+    const userId = (req as AuthRequest).userId;
+    const { theme } = req.body;
+    if (!theme || typeof theme !== 'string') return res.status(400).json({ error: "theme required" });
+    await prisma.user.update({ where: { id: userId }, data: { activeTheme: theme } });
+    res.json({ success: true, theme });
+  } catch (err: unknown) {
+    res.status(500).json({ error: (err instanceof Error ? err.message : String(err)) });
+  }
+});
+
+// GET /profile/ton/rate — текущий курс TON → ᚙ
+router.get("/ton/rate", authMiddleware, async (_req: Request, res: Response) => {
+  try {
+    // Пытаемся получить актуальный курс с CoinGecko
+    let tonUsdt = 5.5; // fallback
+    try {
+      const resp = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd", { signal: AbortSignal.timeout(3000) });
+      if (resp.ok) {
+        const data = await resp.json() as { "the-open-network"?: { usd?: number } };
+        tonUsdt = data["the-open-network"]?.usd ?? tonUsdt;
+      }
+    } catch {}
+    const coinsPerTon = COINS_PER_TON;
+    const coinsPerUsdt = Math.round(coinsPerTon / tonUsdt);
+    // Кошелёк платформы отдаём вместе с курсом. Фронт брал его из значения,
+    // зашитого в код: VITE_PLATFORM_TON_WALLET на проде не задан. Сегодня оба
+    // адреса совпадают, но стоит сменить кошелёк в .env — и комиссия пойдёт
+    // на старый адрес, сервер её не найдёт, и НИ ОДНА покупка не пройдёт
+    // (FEE_NOT_CONFIRMED). Источник правды один — сервер (Кенан 09.08.2026).
+    res.json({
+      tonUsdt, coinsPerTon, coinsPerUsdt, feePercent: 0.5,
+      platformWallet: config.ton.platformWallet ?? null,
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ error: (err instanceof Error ? err.message : String(err)) });
+  }
+});
+
+// POST /profile/ton/buy — купить монеты за TON (создаёт заявку на пополнение)
+router.post("/ton/buy", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).userId;
+    const { amountTon } = req.body;
+    if (!amountTon || parseFloat(amountTon) < 0.1) {
+      return res.status(400).json({ error: "Minimum purchase: 0.1 TON" });
+    }
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { tonWalletAddress: true } });
+    if (!user?.tonWalletAddress) {
+      return res.status(400).json({ error: "Connect TON wallet first" });
+    }
+    if (!(await isWalletUnlocked(userId))) {
+      return res.status(403).json({ error: "Connect and unlock your TON wallet first (1 TON)" });
+    }
+    // ── Проверка платежа в блокчейне ─────────────────────────────────────────
+    // До 2026-07-30 монеты начислялись по числу из тела запроса, без всякой
+    // проверки: любой мог получить миллионы бесплатно (найдено Кенаном,
+    // на проде успело пройти 3 таких начисления на 11 442 500 монет).
+    // Теперь источник истины — блокчейн: сумма берётся из транзакции,
+    // а не из запроса, и один платёж нельзя предъявить дважды.
+    const platformWallet = config.ton.platformWallet;
+    if (!platformWallet) {
+      logger.error("[TON buy] PLATFORM_TON_WALLET не задан — начисление невозможно");
+      return res.status(503).json({ error: "TON deposits temporarily unavailable" });
+    }
+
+    const requestedNano = BigInt(Math.round(parseFloat(amountTon) * 1e9));
+    // Допуск на газ: платёж может прийти чуть меньше заявленного.
+    const minNano = (requestedNano * 97n) / 100n;
+
+    const payment = await findTonPayment(user.tonWalletAddress, platformWallet, minNano);
+    if (!payment) {
+      return res.status(402).json({
+        error: "Payment not found on-chain. Отправьте TON на кошелёк платформы и повторите.",
+      });
+    }
+
+    // Защита от повторного предъявления одного и того же платежа
+    const already = await prisma.tonDeposit.findUnique({ where: { txHash: payment.hash } });
+    if (already) {
+      return res.status(409).json({ error: "This payment has already been credited" });
+    }
+
+    // Начисляем по ФАКТИЧЕСКОЙ сумме из блокчейна, а не по запрошенной
+    const coinsPerTon = COINS_PER_TON;
+    const actualTon = Number(payment.valueNano) / 1e9;
+    const gross = Math.round(actualTon * coinsPerTon);
+    const fee = Math.round(gross * 0.005);
+    const net = gross - fee;
+
+    await prisma.tonDeposit.create({
+      data: {
+        txHash: payment.hash, lt: payment.lt, userId,
+        valueNano: payment.valueNano, coinsCredited: BigInt(net),
+      },
+    });
+    await updateBalance(userId, BigInt(net), TransactionType.TON_DEPOSIT, {
+      amountTon: actualTon,
+      requestedTon: parseFloat(amountTon),
+      txHash: payment.hash,
+      coinsGross: gross,
+      coinsFee: fee,
+      coinsNet: net,
+    });
+    logger.info(`[TON buy] Зачислено ${net} монет юзеру ${userId} по транзакции ${payment.hash.slice(0, 16)}`);
+    res.json({ success: true, coinsReceived: net, fee, amountTon: actualTon });
+  } catch (err: unknown) {
+    res.status(500).json({ error: (err instanceof Error ? err.message : String(err)) });
+  }
+});
+
+// POST /profile/ton/sell — продать монеты за TON (создаёт заявку на выплату)
+router.post("/ton/sell", authMiddleware, async (_req, res: Response) => {
+  // ЗАКРЫТО (Кенан 03.08.2026). Правило: «у нас нет пока выведения ничего
+  // вообще», «крипта из биржи должна идти на наш криптокошелёк и никак не
+  // обратно». Путь оставался живым и уносил монеты из капитала: они
+  // списывались с баланса и никуда не зачислялись. Продать монеты можно
+  // другому игроку через стакан на бирже — монеты остаются внутри системы.
+  res.status(403).json({
+    error: "WITHDRAWALS_CLOSED",
+    message: "Вывод монет за TON закрыт. Продать монеты можно на бирже другому игроку.",
+  });
+});
+
+// GET /profile/:userId/games — публичные игры другого игрока
+router.get("/:userId/games", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { limit, offset } = z.object({
+      limit:  z.coerce.number().min(1).max(50).default(20),
+      offset: z.coerce.number().min(0).default(0),
+    }).parse(req.query);
+
+    const sides = await prisma.sessionSide.findMany({
+      where: {
+        playerId: req.params.userId,
+        isBot: false,
+        session: { status: { in: ["FINISHED", "DRAW", "TIME_EXPIRED", "CANCELLED"] } },
+      },
+      orderBy: { updatedAt: "desc" },
+      take: limit,
+      skip: offset,
+      select: {
+        id: true, status: true, isWhite: true, winningAmount: true,
+        session: {
+          select: {
+            id: true, type: true, status: true, pgn: true,
+            botLevel: true, bet: true, duration: true,
+            startedAt: true, finishedAt: true,
+            sides: {
+              select: {
+                isBot: true, isWhite: true, status: true,
+                player: { select: { id: true, firstName: true, lastName: true, username: true, avatar: true, avatarGradient: true, avatarType: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const total = await prisma.sessionSide.count({
+      where: {
+        playerId: req.params.userId,
+        isBot: false,
+        session: { status: { in: ["FINISHED", "DRAW", "TIME_EXPIRED", "CANCELLED"] } },
+      },
+    });
+
+    const games = sides.map(side => {
+      const session = side.session;
+      const opponent = session.sides.find(s => s.player?.id !== req.params.userId && !s.isBot);
+      const botSide = session.sides.find(s => s.isBot);
+      return {
+        sessionId: session.id,
+        type: session.type,
+        result: side.status === "WON" ? "win" : side.status === "LOST" ? "loss" : "draw",
+        isWhite: side.isWhite,
+        winningAmount: side.winningAmount?.toString() ?? null,
+        bet: session.bet?.toString() ?? null,
+        botLevel: session.botLevel,
+        pgn: session.pgn,
+        duration: session.duration,
+        startedAt: session.startedAt,
+        finishedAt: session.finishedAt,
+        opponent: opponent?.player ?? null,
+        hasBot: !!botSide,
+      };
+    });
+
+    res.json({ total, games });
+  } catch (err: unknown) {
+    res.status(500).json({ error: (err instanceof Error ? err.message : String(err)) });
+  }
+});
+
+// GET /profile/:userId — публичный профиль (должен быть последним!)
+router.get("/:userId", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.params.userId },
+      select: {
+        id: true, firstName: true, lastName: true, username: true,
+        avatar: true, avatarType: true, avatarGradient: true,
+        elo: true, league: true, balance: true, totalEarned: true, createdAt: true,
+        isBanned: true,
+        // PR-3 + текущий фикс: публичные поля для unified `profile` на фронте.
+        achievements: true,
+        tournamentBadges: true,
+        referralCount: true,
+        militaryRank: true,
+        jarvisLevel: true,
+        jarvisBadges: true,
+        jarvisBadgeDates: true,
+        isMonthlyChampion: true,
+        monthlyChampionAt: true,
+        countryMember: {
+          include: { country: { select: { id: true, code: true, flag: true, nameRu: true, nameEn: true } } },
+        },
+        sides: {
+          select: { status: true },
+          take: 100,
+          orderBy: { updatedAt: "desc" },
+        },
+        // B4: экипированные предметы для отображения в публичном профиле
+        inventory: {
+          where: { isEquipped: true },
+          include: {
+            item: {
+              select: { id: true, name: true, type: true, imageUrl: true, rarity: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!user || user.isBanned) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const wins   = user.sides.filter(s => s.status === "WON").length;
+    const losses = user.sides.filter(s => s.status === "LOST").length;
+    const draws  = user.sides.filter(s => s.status === "DRAW").length;
+
+    // B4: формируем equippedItems по типу предмета
+    const equippedItems: Record<string, { id: string; name: string; imageUrl: string | null }> = {};
+    for (const inv of user.inventory) {
+      equippedItems[inv.item.type] = inv.item;
+    }
+
+    // PR-3 (Кенан 2026-05-18): currentTitles — активные титулы юзера для тегов
+    // на профиле. Активный = выдан в текущем периоде (week/month/year).
+    const achievements: Array<{ id: string; date: string }> = Array.isArray(user.achievements)
+      ? (user.achievements as any[]).filter(a => a && typeof a === 'object' && 'id' in a)
+      : [];
+    const now = Date.now();
+    const W = 7 * 24 * 3600_000;
+    const M = 30 * 24 * 3600_000;
+    const Y = 365 * 24 * 3600_000;
+    const isFresh = (date: string, ttl: number) => {
+      try { return now - new Date(date).getTime() < ttl; } catch { return false; }
+    };
+    const currentTitles: Array<{ type: string; label: string; date: string }> = [];
+    for (const a of achievements) {
+      if (a.id === 'tournament_winner_week'  && isFresh(a.date, W)) currentTitles.push({ type: 'WEEK_CHAMPION',  label: 'Чемпион недели',  date: a.date });
+      if (a.id === 'tournament_winner_month' && isFresh(a.date, M)) currentTitles.push({ type: 'MONTH_CHAMPION', label: 'Чемпион месяца',  date: a.date });
+      if (a.id === 'tournament_winner_year'  && isFresh(a.date, Y)) currentTitles.push({ type: 'YEAR_CHAMPION',  label: 'Чемпион года',    date: a.date });
+    }
+
+    // PR-3 hotfix: проверка isCommander для чужого профиля.
+    let isCountryCommander = false;
+    if (user.countryMember?.countryId) {
+      // Главком — топ-1 по referralCount среди APPROVED-членов страны.
+      const top = await prisma.countryMember.findFirst({
+        where: { countryId: user.countryMember.countryId, status: 'APPROVED' as any },
+        include: { user: { select: { id: true, referralCount: true } } },
+        orderBy: [{ joinedAt: 'asc' }],
+      });
+      // Сортируем во фронте: тот у кого больше referralCount.
+      const all = await prisma.countryMember.findMany({
+        where: { countryId: user.countryMember.countryId, status: 'APPROVED' as any },
+        include: { user: { select: { id: true, referralCount: true } } },
+      });
+      all.sort((a, b) => (b.user.referralCount ?? 0) - (a.user.referralCount ?? 0));
+      isCountryCommander = all[0]?.userId === user.id;
+      void top;
+    }
+
+    // PR-3: military rank данные (структура как в /auth/me)
+    const { getMilitaryRank, getRankBonuses } = await import('@/utils/militaryRank');
+    const refCount = user.referralCount ?? 0;
+    const rankInfo = getMilitaryRank(refCount);
+    const bonuses = getRankBonuses(refCount);
+
+    res.json({
+      id: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      username: user.username,
+      avatar: user.avatar,
+      avatarType: user.avatarType,
+      avatarGradient: user.avatarGradient,
+      elo: user.elo,
+      league: user.league,
+      // Balance публичный: рейтинг строится по балансу (Leaderboard уже
+      // показывает балансы), это нормально для внутриигровой монеты.
+      balance: user.balance.toString(),
+      totalEarned: user.totalEarned.toString(),
+      createdAt: user.createdAt,
+      stats: { wins, losses, draws, total: user.sides.length },
+      // Плоские поля для совместимости с frontend `profile.X` (используется
+      // в Info-вкладке: CircStat, StatCard, ELO chart):
+      totalGames: wins + losses + draws,
+      wins, losses, draws,
+      winStreak: 0, // Поле отсутствует в Prisma-схеме (как в auth/me — всегда 0)
+      equippedItems,
+      achievements,
+      currentTitles,
+      // Публичные поля для отображения тегов и достижений на чужом профиле:
+      referralCount: refCount,
+      jarvisLevel: user.jarvisLevel ?? 1,
+      jarvisBadges: user.jarvisBadges ?? [],
+      jarvisBadgeDates: user.jarvisBadgeDates ?? {},
+      tournamentBadges: user.tournamentBadges ?? [],
+      isMonthlyChampion: user.isMonthlyChampion ?? false,
+      monthlyChampionAt: user.monthlyChampionAt,
+      militaryRank: {
+        rank: rankInfo.rank,
+        label: rankInfo.label,
+        emoji: rankInfo.emoji,
+        minMembers: rankInfo.minMembers,
+        activationBonus: bonuses.activationBonus.toString(),
+        l1Percent: bonuses.l1Percent,
+      },
+      countryMember: user.countryMember ? {
+        country: user.countryMember.country,
+        role: isCountryCommander ? 'COMMANDER' : 'FIGHTER',
+        isCommander: isCountryCommander,
+      } : null,
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ error: (err instanceof Error ? err.message : String(err)) });
+  }
+});
+
+export default router;

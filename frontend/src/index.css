@@ -1,0 +1,1824 @@
+@import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@600;700;800;900&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap');
+
+:root {
+  /* Типографика и отступы (Единый Web3/Lichess Стандарт) */
+  --space-xs: 4px;
+  --space-s: 8px;
+  --space-m: 12px;
+  --space-l: 16px;
+  --space-xl: 24px;
+
+  --radius-s: 8px;
+  --radius-m: 12px;
+  --radius-l: 16px;
+  --radius-xl: 24px;
+  --radius-round: 9999px;
+
+  /* Строгая сетка Z-index */
+  --z-bg: 0;
+  --z-base: 10;
+  --z-header: 50;
+  --z-nav: 100;
+  --z-overlay: 200;
+  --z-modal: 300;
+  --z-toast: 400;
+
+  /* Основной фон */
+  --bg: #0B0D11;
+  --border: rgba(255, 255, 255, 0.1);
+  --text-primary: #F0F2F8;
+  --text-secondary: #8B92A8;
+  --bg-input: #232840;
+
+  /* Цветовая палитра (Основная) */
+  --color-accent: #F5C842;
+  --color-accent-light: #F5E6A0;
+  --color-accent-dark: #E8B61E;
+
+  --color-text-primary: #F0F2F8;
+  --color-text-secondary: #8B92A8;
+  --color-text-muted: #4A5270;
+
+  --color-bg-dark: #0B0D11;
+  --color-bg-card: #1C2030;
+  --color-bg-modal: #161927;
+  --color-bg-input: #232840;
+  --color-bg-light: #13161F;
+
+  --color-green: #00D68F;
+  --color-green-dark: #00A066;
+
+  --color-red: #FF4D6A;
+  --color-red-light: #FF6B82;
+
+  --color-blue: #0098EA;
+  --color-blue-light: #64C8FF;
+
+  --color-purple: #9B85FF;
+  --color-purple-dark: #7B61FF;
+
+  --color-gold: #FFD700;
+  --color-pink: #E040FB;
+  --color-orange: #FF9F43;
+
+  --color-border: rgba(255, 255, 255, 0.1);
+  --color-border-light: rgba(255, 255, 255, 0.05);
+
+  /* Тени (обновлены для glassmorphism) */
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.15);
+  --shadow-md: 0 4px 24px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.5);
+
+  /* ── DARK GLASSMORPHISM: ГЛУБОКИЕ ТЕНИ ────────────────────────────── */
+  --shadow-glass-sm: 0 4px 16px rgba(0, 0, 0, 0.3);
+  --shadow-glass-md: 0 8px 32px rgba(0, 0, 0, 0.36);
+  --shadow-glass-lg: 0 20px 60px rgba(0, 0, 0, 0.3);
+  --shadow-glass-xl: 0 40px 120px rgba(0, 0, 0, 0.36);
+  --shadow-glass-inset: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  --shadow-glass-inset-hover: inset 0 1px 0 rgba(255, 255, 255, 0.15);
+
+  /* ── GLASSMORPHISM: ФИЛЬТРЫ И ЭФФЕКТЫ ──────────────────────────────── */
+  --backdrop-blur-sm: blur(8px);
+  --backdrop-blur-md: blur(12px);
+  --backdrop-blur-lg: blur(16px);
+  --backdrop-blur-xl: blur(20px);
+
+  /* ── GLASSMORPHISM: ЦВЕТОВЫЕ СЛОИ ──────────────────────────────────── */
+  --glass-overlay-subtle: rgba(255, 255, 255, 0.05);
+  --glass-overlay-light: rgba(255, 255, 255, 0.1);
+
+  /* ── GLASSMORPHISM: БОРДЕРЫ (light-catching) ───────────────────────── */
+  --glass-border: 1px solid rgba(255, 255, 255, 0.1);
+  --glass-border-hover: 1px solid rgba(255, 255, 255, 0.15);
+  --glass-border-accent: 1px solid rgba(255, 255, 255, 0.2);
+
+  /* ── ПЕРЕХОДЫ И АНИМАЦИИ ────────────────────────────────────────── */
+  --transition-fast: 150ms;
+  --transition-normal: 250ms;
+  --transition-slow: 400ms;
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+
+  /* ── ТИПОГРАФИЯ: ШКАЛА РАЗМЕРОВ ──────────────────────────────────── */
+  --font-size-xs: 10px;      /* Крошечный: бейджи, подписи */
+  --font-size-sm: 12px;      /* Малый: лейблы, вторичный текст */
+  --font-size-base: 14px;    /* Базовый: основной текст */
+  --font-size-md: 16px;      /* Средний: крупный текст */
+  --font-size-lg: 18px;      /* Большой: заголовки карточек */
+  --font-size-xl: 20px;      /* XL: заголовки секций */
+  --font-size-2xl: 24px;     /* 2XL: заголовки страниц */
+  --font-size-3xl: 28px;     /* 3XL: баннеры */
+
+  /* ── ТИПОГРАФИЯ: ВЕС ШРИФТА ───────────────────────────────────────── */
+  --font-weight-regular: 400;    /* Базовый текст */
+  --font-weight-medium: 500;     /* Немного выделенный */
+  --font-weight-semibold: 600;   /* Выделенный, лейблы */
+  --font-weight-bold: 700;       /* Сильно выделенный, заголовки */
+  --font-weight-extrabold: 800;  /* Очень сильно, герой текст */
+
+  /* ── ТИПОГРАФИЯ: ВЫСОТА СТРОКИ ────────────────────────────────────── */
+  --line-height-tight: 1.2;      /* Плотная: заголовки */
+  --line-height-normal: 1.5;     /* Нормальная: основной текст */
+  --line-height-relaxed: 1.75;   /* Просторная: длинные тексты */
+  --line-height-loose: 2;        /* Очень просторная */
+
+  /* ── ТИПОГРАФИЯ: ИНТЕРВАЛ МЕЖДУ БУКВ ──────────────────────────────── */
+  --letter-spacing-tight: -0.5px;    /* Заголовки */
+  --letter-spacing-normal: 0px;      /* Базовый */
+  --letter-spacing-wide: 0.5px;      /* Выделенный */
+
+  /* ── КНОПКИ: РАЗМЕРЫ ───────────────────────────────────────────────── */
+  --button-height-sm: 32px;      /* Маленькие */
+  --button-height-md: 44px;      /* Средние (основные) */
+  --button-height-lg: 56px;      /* Большие */
+  --button-padding-x-sm: 12px;   /* Маленькое горизонтальное */
+  --button-padding-x-md: 16px;   /* Среднее горизонтальное */
+  --button-padding-x-lg: 24px;   /* Большое горизонтальное */
+
+  /* ── КАРТОЧКИ: РАЗМЕРЫ ─────────────────────────────────────────────── */
+  --card-padding-sm: 8px;        /* Минимальный отступ */
+  --card-padding-md: 12px;       /* Стандартный отступ */
+  --card-padding-lg: 16px;       /* Щедрый отступ */
+  --card-padding-xl: 24px;       /* Очень щедрый отступ */
+
+  /* ── МОДАЛИ: РАЗМЕРЫ ───────────────────────────────────────────────── */
+  --modal-width-sm: 280px;      /* Маленькие модали */
+  --modal-width-md: 360px;      /* Стандартные модали */
+  --modal-width-lg: 480px;      /* Большие модали */
+
+  /* ── ИКОНКИ: РАЗМЕРЫ ───────────────────────────────────────────────── */
+  --icon-size-xs: 16px;          /* Крошечные */
+  --icon-size-sm: 20px;          /* Маленькие */
+  --icon-size-md: 24px;          /* Средние */
+  --icon-size-lg: 32px;          /* Большие */
+  --icon-size-xl: 48px;          /* XL */
+  --icon-size-2xl: 64px;         /* 2XL */
+
+  /* ── АВАТАРЫ: РАЗМЕРЫ ──────────────────────────────────────────────── */
+  --avatar-size-xs: 24px;        /* Крошечные */
+  --avatar-size-sm: 32px;        /* Маленькие */
+  --avatar-size-md: 48px;        /* Средние */
+  --avatar-size-lg: 64px;        /* Большие */
+  --avatar-size-xl: 96px;        /* XL */
+  --avatar-border-radius: var(--radius-round);
+
+  /* ── ОТСТУПЫ/ЗАЗОРЫ: РАСШИРЕННАЯ ШКАЛА ─────────────────────────────── */
+  --gap-xs: 4px;     /* Крошечные */
+  --gap-sm: 8px;     /* Маленькие */
+  --gap-md: 12px;    /* Средние */
+  --gap-lg: 16px;    /* Большие */
+  --gap-xl: 24px;    /* XL */
+  --gap-2xl: 32px;   /* 2XL */
+  --gap-3xl: 48px;   /* 3XL */
+
+  /* ── ВВОДЫ: РАЗМЕРЫ ────────────────────────────────────────────────── */
+  --input-height-sm: 32px;       /* Маленькие */
+  --input-height-md: 40px;       /* Средние */
+  --input-height-lg: 48px;       /* Большие */
+  --input-padding-x: 12px;
+  --input-padding-y: 10px;
+
+  /* ── ЗАГОЛОВКИ: СТИЛИ ──────────────────────────────────────────────── */
+  --heading-1-font-size: var(--font-size-2xl);
+  --heading-1-font-weight: var(--font-weight-bold);
+  --heading-1-line-height: var(--line-height-tight);
+
+  --heading-2-font-size: var(--font-size-xl);
+  --heading-2-font-weight: var(--font-weight-bold);
+
+  --heading-3-font-size: var(--font-size-lg);
+  --heading-3-font-weight: var(--font-weight-semibold);
+
+  /* ── ЛЕЙБЛЫ И ПОДПИСИ ─────────────────────────────────────────────── */
+  --label-font-size: var(--font-size-sm);
+  --label-font-weight: var(--font-weight-semibold);
+
+  --caption-font-size: var(--font-size-xs);
+  --caption-font-weight: var(--font-weight-regular);
+  --caption-color: var(--color-text-secondary);
+
+  /* ── ПЕРЕХОДЫ И ЗАТУХАНИЯ ──────────────────────────────────────────── */
+  --transition-fast: 150ms;
+  --transition-normal: 250ms;
+  --transition-slow: 400ms;
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Chess Board Colors (L1) */
+  --chess-selected-bg: rgba(123, 97, 255, 0.45);
+  --chess-move-bg: radial-gradient(circle, rgba(123, 97, 255, 0.55) 22%, transparent 22%);
+  --chess-capture-bg: radial-gradient(circle, rgba(255, 77, 106, 0.5) 100%, transparent 100%);
+  --chess-last-move-bg: rgba(245, 200, 66, 0.18);
+
+  /* Chess Board Skins (L1) */
+  --chess-skin-classic-light: #F0D9B5;
+  --chess-skin-classic-dark: #B58863;
+  --chess-skin-marble-light: #E8E0D8;
+  --chess-skin-marble-dark: #8C7B6B;
+  --chess-skin-gold-light: #F5E6A0;
+  --chess-skin-gold-dark: #C8960A;
+  --chess-skin-night-light: #1C1C2E;
+  --chess-skin-night-dark: #0D0D1A;
+  --chess-skin-malachite-light: #A8D5A2;
+  --chess-skin-malachite-dark: #3A7A34;
+  --chess-skin-neon-light: #0D1F2D;
+  --chess-skin-neon-dark: #071520;
+  --chess-skin-ice-light: #D8EEF8;
+  --chess-skin-ice-dark: #6090B8;
+  --chess-skin-cyber-light: #0A0A1A;
+  --chess-skin-cyber-dark: #050510;
+
+  /* ShopItemCards Board Skins (L1) */
+  --shop-board-classic-light: #F0D9B5;
+  --shop-board-classic-dark: #B58863;
+  --shop-board-chesscoin-light: #EDF1FB;
+  --shop-board-chesscoin-dark: #8B9DD4;
+  --shop-board-marble-light: #E8E0D8;
+  --shop-board-marble-dark: #8C7B6B;
+  --shop-board-gold-light: #F5E6A0;
+  --shop-board-gold-dark: #C8960A;
+  --shop-board-night-light: #1C1C2E;
+  --shop-board-night-dark: #0D0D1A;
+  --shop-board-malachite-light: #A8D5A2;
+  --shop-board-malachite-dark: #3A7A34;
+  --shop-board-neon-light: #0D1F2D;
+  --shop-board-neon-dark: #071520;
+  --shop-board-ice-light: #D8EEF8;
+  --shop-board-ice-dark: #6090B8;
+
+  /* StatComponents Colors (L1) */
+  --stat-circle-bg-stroke: #2A2F48;
+  --stat-card-border: rgba(255, 255, 255, 0.07);
+
+  /* Modal Colors (L1) */
+  --modal-overlay-bg: rgba(0, 0, 0, 0.75);
+  --modal-border: rgba(255, 255, 255, 0.1);
+  --modal-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  --modal-divider: rgba(255, 255, 255, 0.05);
+
+  /* Chess UI Elements (L1) */
+  --chess-emoji-text-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --chess-piece-shadow: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.3));
+  --chess-board-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  --chess-save-btn-bg: rgba(28, 32, 48, 0.85);
+  --chess-save-btn-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  --chess-save-btn-active-shadow: 0 0 10px rgba(245, 200, 66, 0.3);
+
+  /* GameSetupModal Colors (L1) */
+  --modal-overlay-bg: rgba(0, 0, 0, 0.7);
+  --modal-launch-border: rgba(245, 200, 66, 0.2);
+  --modal-launch-shadow: 0 0 80px rgba(245, 200, 66, 0.12), 0 30px 60px rgba(0, 0, 0, 0.5);
+  --modal-glow-gradient: conic-gradient(from 0deg, #F5C842, #9B85FF, #F5C842);
+  --modal-player-chip-bg: rgba(245, 200, 66, 0.1);
+  --modal-player-chip-border: rgba(245, 200, 66, 0.25);
+  --modal-countdown-bg: rgba(245, 200, 66, 0.08);
+  --modal-countdown-border: rgba(245, 200, 66, 0.4);
+  --modal-countdown-shadow: 0 0 30px rgba(245, 200, 66, 0.2);
+  --modal-color-active-bg: rgba(245, 200, 66, 0.1);
+  --modal-time-active-bg: rgba(123, 97, 255, 0.15);
+  --modal-time-active-border: rgba(123, 97, 255, 0.4);
+  --modal-time-active-color: #9B85FF;
+  --modal-jarvis-chip-bg: rgba(155, 133, 255, 0.12);
+  --modal-jarvis-chip-border: rgba(155, 133, 255, 0.3);
+  --modal-jarvis-chip-color: #9B85FF;
+  --modal-start-btn-shadow: 0 4px 20px rgba(245, 200, 66, 0.3);
+  --gamesetup-sheet-border: rgba(255, 255, 255, 0.1);
+  --gamesetup-back-btn-border: rgba(255, 255, 255, 0.1);
+
+  /* JarvisInfoModal Colors (L1) */
+  --jarvis-info-overlay-bg: rgba(0, 0, 0, 0.7);
+  --jarvis-info-box-gradient: linear-gradient(145deg, rgba(30, 34, 52, 0.95), rgba(20, 24, 35, 0.95));
+  --jarvis-info-box-border: rgba(123, 97, 255, 0.3);
+  --jarvis-info-box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+  --jarvis-info-close-bg: rgba(255, 255, 255, 0.05);
+  --jarvis-info-tier-dark-bg: rgba(0, 0, 0, 0.2);
+  --jarvis-info-tier-border: rgba(255, 255, 255, 0.05);
+  --jarvis-info-mystic-gradient: linear-gradient(90deg, rgba(245, 200, 66, 0.15), rgba(245, 200, 66, 0.05));
+  --jarvis-info-mystic-border: rgba(245, 200, 66, 0.3);
+  --jarvis-info-mystic-badge-bg: rgba(245, 200, 66, 0.2);
+  --jarvis-tier1-color: #00D68F;
+  --jarvis-tier2-color: #3498db;
+  --jarvis-tier3-color: #e67e22;
+  --jarvis-tier4-color: #FF4D6A;
+
+  /* GameResultModal Colors (L1) */
+  --result-win-glow: rgba(245, 200, 66, 0.25);
+  --result-win-bg: linear-gradient(160deg, #1a1c0f 0%, #0B0D11 60%);
+  --result-win-border: rgba(245, 200, 66, 0.3);
+  --result-lose-glow: rgba(255, 77, 106, 0.2);
+  --result-lose-bg: linear-gradient(160deg, #1a0b0d 0%, #0B0D11 60%);
+  --result-lose-border: rgba(255, 77, 106, 0.25);
+  --result-draw-glow: rgba(139, 146, 168, 0.15);
+  --result-draw-bg: linear-gradient(160deg, #12141c 0%, #0B0D11 60%);
+  --result-draw-border: rgba(255, 255, 255, 0.12);
+  --result-overlay-bg: rgba(0, 0, 0, 0.7);
+  --result-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  --result-coins-bg: rgba(255, 255, 255, 0.04);
+  --result-coins-border: rgba(255, 255, 255, 0.07);
+  --result-divider-border: rgba(255, 255, 255, 0.07);
+  --result-total-shadow: 0 0 12px rgba(245, 200, 66, 0.5);
+  --result-share-btn-bg: rgba(123, 97, 255, 0.12);
+  --result-share-btn-border: rgba(123, 97, 255, 0.25);
+  --result-rematch-btn-border: rgba(245, 200, 66, 0.4);
+  --result-save-unsaved-bg: rgba(123, 97, 255, 0.1);
+  --result-save-unsaved-border: rgba(123, 97, 255, 0.25);
+  --result-save-saved-bg: rgba(0, 214, 143, 0.1);
+  --result-save-saved-border: rgba(0, 214, 143, 0.25);
+
+  /* ShopItemCards Colors (L1) */
+  --shop-pieceset-gradient: linear-gradient(135deg, #0D0F1A, #151828);
+  --shop-pieceset-shadow: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.5));
+  --shop-card-bg: #1C2030;
+  --shop-card-preview-bg: #13161E;
+  --shop-board-fallback-light: #E8EDF9;
+  --shop-board-fallback-dark: #8B9DD4;
+  --shop-equipped-badge-bg: rgba(0, 214, 143, 0.08);
+  --shop-equipped-badge-border: rgba(0, 214, 143, 0.2);
+  --shop-unequip-btn-bg: rgba(255, 77, 106, 0.12);
+  --shop-unequip-btn-border: rgba(255, 77, 106, 0.25);
+
+  /* MoveAnnouncer Colors (L1) */
+  --move-announcer-rainbow-gradient: linear-gradient(90deg, #FF4D6A, #FF9F43, #F5C842, #00D68F, #64C8FF, #9B85FF, #FF4D6A);
+  --move-announcer-opening-bg: rgba(155, 133, 255, 0.15);
+  --move-announcer-opening-color: #9B85FF;
+  --move-announcer-special-bg: rgba(245, 200, 66, 0.15);
+  --move-announcer-special-color: #F5C842;
+  --move-announcer-tactics-bg: rgba(255, 77, 106, 0.15);
+  --move-announcer-tactics-color: #FF4D6A;
+  --move-announcer-main-text-shadow: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.9));
+  --move-announcer-sub-text-color: rgba(255, 255, 255, 0.7);
+  --move-announcer-sub-text-shadow: drop-shadow(0 1px 4px rgba(0, 0, 0, 0.9));
+
+  /* BattleCard Colors (L1) */
+  --battle-card-border: rgba(255, 255, 255, 0.05);
+  --battle-card-spectate-bg: rgba(245, 200, 66, 0.1);
+  --battle-card-spectate-border: rgba(245, 200, 66, 0.25);
+  --battle-card-save-bg: rgba(123, 97, 255, 0.12);
+  --battle-card-save-color: #9B85FF;
+  --battle-card-save-border: rgba(123, 97, 255, 0.25);
+
+  /* WaitingForOpponent Colors (L1) */
+  --waiting-card-border: rgba(255, 255, 255, 0.1);
+  --waiting-pulse-dot-border: rgba(155, 133, 255, 0.5);
+  --waiting-code-block-bg: rgba(245, 200, 66, 0.06);
+  --waiting-code-block-border: rgba(245, 200, 66, 0.15);
+  --waiting-link-box-bg: rgba(155, 133, 255, 0.08);
+  --waiting-link-box-border: rgba(155, 133, 255, 0.15);
+  --waiting-icon-btn-accent-bg: rgba(245, 200, 66, 0.12);
+  --waiting-icon-btn-green-bg: rgba(0, 214, 143, 0.12);
+  --waiting-cancel-btn-border: rgba(255, 77, 106, 0.2);
+
+  /* EventEffects Colors (L1) */
+  --color-check-flash: rgba(255, 50, 50, 0.35);
+  --color-capture-ring-1: rgba(255, 150, 0, 0.7);
+  --color-capture-ring-2: rgba(255, 200, 50, 0.9);
+  --color-capture-star: rgba(255, 220, 80, 0.95);
+  --color-capture-star-shadow: rgba(255, 200, 50, 0.8);
+  --color-capture-flash: rgba(255, 150, 0, 0.15);
+  --color-accent-glow: rgba(245, 200, 66, 0.5);
+  --color-accent-text-shadow: rgba(245, 200, 66, 0.8);
+  --event-confetti-pink: #FF6B9D;
+  --event-confetti-lime: #00FF9D;
+  --event-star-cream: #FFF8DC;
+  --event-star-light: #FFFACD;
+  --event-mate-banner-bg: rgba(0, 0, 0, 0.85);
+
+  /* Active Sessions Modal (L1) */
+  --active-sessions-backdrop: rgba(0, 0, 0, 0.75);
+  --active-sessions-border-light: rgba(255, 255, 255, 0.1);
+  --active-sessions-border-subtle: rgba(255, 255, 255, 0.07);
+  --active-sessions-my-turn-gradient: linear-gradient(135deg, rgba(0, 214, 143, 0.08), rgba(0, 214, 143, 0.03));
+  --active-sessions-my-turn-border: rgba(0, 214, 143, 0.25);
+  --active-sessions-bot-avatar-bg: rgba(155, 133, 255, 0.15);
+  --active-sessions-bot-avatar-border: rgba(155, 133, 255, 0.3);
+  --active-sessions-status-fallback-color: #8B92A8;
+
+  /* Attempts Modal (L1) */
+  --attempts-overlay-bg: rgba(0, 0, 0, 0.65);
+  --attempts-border-subtle: rgba(255, 255, 255, 0.07);
+  --attempts-border-light: rgba(255, 255, 255, 0.13);
+  --attempts-close-btn-border: rgba(255, 255, 255, 0.1);
+  --attempts-accent-drop-shadow: drop-shadow(0 0 8px rgba(245, 200, 66, 0.8));
+
+  /* PageLayout (L1) */
+  --page-layout-overlay-bg: rgba(0, 0, 0, 0.75);
+  --page-layout-modal-border: rgba(255, 255, 255, 0.1);
+  --page-layout-modal-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  --page-layout-btn-bg: rgba(255, 255, 255, 0.07);
+  --page-layout-dot-inactive-bg: rgba(255, 255, 255, 0.15);
+
+  /* Badge Detail Modal (L1) */
+  --badge-overlay-bg: rgba(0, 0, 0, 0.75);
+  --badge-btn-border: rgba(255, 255, 255, 0.1);
+  --badge-color-player: #00B4D8;
+  --badge-color-warrior: #4CAF50;
+  --badge-color-professional: #FF9F43;
+  --badge-color-epic: #FF6B6B;
+  --badge-color-legendary: #E040FB;
+
+  /* Victory Screen (L1) */
+  --victory-overlay-bg: rgba(0, 0, 0, 0.88);
+  --victory-countdown-inactive-dot: rgba(255, 255, 255, 0.2);
+  --victory-opponent-text-color: rgba(255, 255, 255, 0.8);
+
+  /* JarvisModal Colors (L1) */
+  --jarvis-modal-overlay-bg: rgba(0, 0, 0, 0.7);
+  --jarvis-modal-sheet-border: rgba(255, 255, 255, 0.1);
+  --jarvis-modal-footer-hint-bg: rgba(123, 97, 255, 0.08);
+  --jarvis-modal-footer-hint-border: rgba(123, 97, 255, 0.15);
+  --jarvis-modal-card-active-bg: rgba(245, 200, 66, 0.07);
+  --jarvis-modal-card-completed-bg: rgba(0, 214, 143, 0.04);
+  --jarvis-modal-card-active-border: rgba(245, 200, 66, 0.3);
+  --jarvis-modal-card-completed-border: rgba(0, 214, 143, 0.15);
+  --jarvis-modal-card-default-border: rgba(255, 255, 255, 0.07);
+  --jarvis-modal-num-completed-bg: rgba(0, 214, 143, 0.15);
+  --jarvis-modal-num-active-bg: rgba(245, 200, 66, 0.15);
+  --jarvis-modal-num-default-border: rgba(255, 255, 255, 0.1);
+
+  /* PromotionModal Colors (L1) */
+  --promotion-overlay-bg: rgba(0, 0, 0, 0.8);
+  --promotion-modal-glow-shadow: rgba(245, 200, 66, 0.35);
+  --promotion-modal-shadow: rgba(0, 0, 0, 0.7);
+  --promotion-title-text-shadow: rgba(245, 200, 66, 0.6);
+  --promotion-btn-border: rgba(255, 255, 255, 0.1);
+  --promotion-chosen-btn-bg: rgba(245, 200, 66, 0.15);
+  --promotion-chosen-btn-shadow: rgba(245, 200, 66, 0.4);
+  --promotion-spark-1: #F5C842;
+  --promotion-spark-2: #FF4D6A;
+  --promotion-spark-3: #9B85FF;
+  --promotion-spark-4: #00D68F;
+  --promotion-spark-5: #FF9F43;
+  --promotion-spark-6: #64C8FF;
+  --promotion-spark-7: #FFD700;
+  --promotion-spark-8: #E040FB;
+  --promotion-spark-9: #00FF9D;
+
+  /* WarChallengePopup Colors (L1) */
+  --war-challenge-overlay-bg: rgba(0, 0, 0, 0.8);
+  --war-challenge-modal-border: rgba(255, 77, 106, 0.3);
+  --war-challenge-modal-glow-shadow: rgba(255, 77, 106, 0.15);
+  --war-challenge-modal-shadow: rgba(0, 0, 0, 0.5);
+  --war-challenge-decline-btn-bg: rgba(255, 255, 255, 0.05);
+  --war-challenge-decline-btn-border: rgba(255, 255, 255, 0.1);
+
+  /* PromptModal Colors (L1) */
+  --prompt-overlay-bg: rgba(0, 0, 0, 0.72);
+  --prompt-modal-border: rgba(155, 133, 255, 0.25);
+  --prompt-modal-glow-shadow: rgba(155, 133, 255, 0.2);
+  --prompt-modal-shadow: rgba(0, 0, 0, 0.5);
+  --prompt-close-btn-bg: rgba(255, 255, 255, 0.07);
+  --prompt-close-btn-border: rgba(255, 255, 255, 0.1);
+  --prompt-title-text-shadow: rgba(155, 133, 255, 0.3);
+  --prompt-input-bg: rgba(255, 255, 255, 0.05);
+  --prompt-input-border: rgba(155, 133, 255, 0.3);
+  --prompt-btn-disabled-bg: rgba(155, 133, 255, 0.05);
+  --prompt-btn-active-bg: rgba(155, 133, 255, 0.15);
+  --prompt-btn-border: rgba(155, 133, 255, 0.35);
+  --prompt-cancel-btn-border: rgba(255, 255, 255, 0.08);
+
+  /* Candle Chart (L1) */
+  --chart-text-color: #4A5270;
+  --chart-grid-line: rgba(255, 255, 255, 0.03);
+  --chart-border-subtle: rgba(255, 255, 255, 0.06);
+  --chart-up-color: #00D68F;
+  --chart-down-color: #FF4D6A;
+
+  /* Avatar (L1) */
+  --avatar-border-subtle: rgba(255, 255, 255, 0.12);
+  --avatar-border-light: rgba(255, 255, 255, 0.18);
+  --avatar-gradient-1: linear-gradient(135deg, #3A2A8A, #5A3ABB);
+  --avatar-gradient-2: linear-gradient(135deg, #1A3A5A, #2A6A9A);
+  --avatar-gradient-3: linear-gradient(135deg, #4A1A2A, #8A2A4A);
+  --avatar-gradient-4: linear-gradient(135deg, #1A4A2A, #2A8A4A);
+
+  /* PgnReplayModal Colors (L1) */
+  --pgn-replay-overlay-bg: rgba(0, 0, 0, 0.85);
+  --pgn-replay-modal-border: rgba(255, 255, 255, 0.1);
+  --pgn-replay-save-unsaved-bg: rgba(155, 133, 255, 0.1);
+  --pgn-replay-save-unsaved-border: rgba(155, 133, 255, 0.2);
+  --pgn-replay-save-saved-bg: rgba(0, 214, 143, 0.1);
+  --pgn-replay-save-saved-border: rgba(0, 214, 143, 0.2);
+
+  /* BadgeDetailModal Colors (L1) */
+  --badge-overlay-bg: rgba(0, 0, 0, 0.75);
+  --badge-color-player: #00B4D8;
+  --badge-color-warrior: #4CAF50;
+  --badge-color-professional: #FF9F43;
+  --badge-color-epic: #FF6B6B;
+  --badge-color-legendary: #E040FB;
+  --badge-btn-border: rgba(255, 255, 255, 0.1);
+
+  /* AvatarCropModal Colors (L1) */
+  --avatar-crop-overlay-bg: rgba(0, 0, 0, 0.88);
+  --avatar-crop-cancel-border: rgba(255, 255, 255, 0.15);
+
+  /* ConfirmModal Colors (L1) */
+  --confirm-cancel-btn-border: rgba(255, 255, 255, 0.1);
+  --confirm-danger-btn-bg: rgba(255, 77, 106, 0.15);
+  --confirm-danger-btn-border: rgba(255, 77, 106, 0.4);
+
+  /* ErrorBoundary Colors (L1) */
+  --error-boundary-stack-bg: rgba(0, 0, 0, 0.3);
+
+  /* BottomNav Colors (L1) */
+  --bottom-nav-active-shadow: 0 2px 8px rgba(245, 200, 66, 0.5);
+
+  /* Toast Colors (L1) */
+  --toast-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+
+  /* MiniProfileSheet Colors (L1) */
+  --mini-profile-overlay-bg: rgba(0, 0, 0, 0.5);
+  --mini-profile-sheet-border: rgba(255, 255, 255, 0.1);
+  --mini-profile-ghost-btn-border: rgba(255, 255, 255, 0.13);
+
+  /* WaitingForOpponent Colors (L1) */
+  --whatsapp-color: #25D366;
+  --whatsapp-bg: rgba(37, 211, 102, 0.1);
+
+  /* BattleHistoryPage Colors (L1) */
+  --battle-history-page-info-color: #6A7090;
+  --battle-history-loader-color: #7B61FF;
+
+  /* BattlesPage Colors (L1) */
+  --battles-page-live-indicator-color: #EF4444;
+  --battles-modal-handle-color: #2A2F48;
+
+  /* ExchangeTab Colors (L1) */
+  --exchange-ton-connect-gradient: linear-gradient(90deg, #0098EA, #006FB8);
+  --exchange-ton-shop-gradient: linear-gradient(90deg, #0098EA, #007AC2);
+  --shop-ton-wallet-gradient: linear-gradient(135deg, #0098EA, #006BBF);
+
+  /* ── CHESS TIMER APP: ЦВЕТОВАЯ ПАЛИТРА ────────────────────────────────── */
+  --timer-bg-primary: #000000;
+  --timer-bg-blur: #202BB5;
+  --timer-text-primary: #FFFFFF;
+  --timer-text-secondary: #E2E3E5;
+  --timer-text-muted: #8B92A8;
+  --timer-accent-blue: #407BFF;
+  --timer-highlight: #D2E5F4;
+  --timer-input-border: rgba(255, 255, 255, 0.1);
+  --timer-icon-color: #D2E5F4;
+  --timer-icon-disabled: #374955;
+
+  /* Responsive Breakpoints (L2) */
+  --breakpoint-xs: 320px;
+  --breakpoint-sm: 480px;
+  --breakpoint-md: 768px;
+  --breakpoint-lg: 1024px;
+}
+
+/* ── АДАПТИВНАЯ ТИПОГРАФИЯ: МОБИЛЬНЫЙ (до 479px) ────────────────────── */
+@media (max-width: 479px) {
+  :root {
+    /* Чуть меньше шрифты на мобильных */
+    --font-size-sm: 11px;
+    --font-size-base: 13px;
+    --font-size-md: 14px;
+    --font-size-lg: 16px;
+    --font-size-xl: 18px;
+    --font-size-2xl: 22px;
+
+    /* Чуть плотнее строки */
+    --line-height-normal: 1.4;
+
+    /* Компактнее отступы */
+    --space-l: 12px;
+    --space-xl: 16px;
+    --gap-lg: 12px;
+    --gap-xl: 16px;
+    --card-padding-lg: 12px;
+
+    /* Меньше кнопки */
+    --button-height-md: 40px;
+    --button-padding-x-md: 14px;
+  }
+}
+
+/* ── АДАПТИВНАЯ ТИПОГРАФИЯ: ПЛАНШЕТ (480px - 767px) ─────────────────── */
+@media (min-width: 480px) and (max-width: 767px) {
+  :root {
+    --font-size-base: 14px;
+    --font-size-md: 15px;
+    --font-size-lg: 17px;
+  }
+}
+
+/* ── АДАПТИВНАЯ ТИПОГРАФИЯ: ДЕСКТОП (768px+) ────────────────────────── */
+@media (min-width: 768px) {
+  :root {
+    /* Полный размер */
+    --font-size-base: 14px;
+    --font-size-md: 16px;
+    --font-size-lg: 18px;
+    --font-size-xl: 20px;
+
+    /* Более просторные строки */
+    --line-height-normal: 1.6;
+
+    /* Щедрые отступы */
+    --gap-2xl: 40px;
+    --gap-3xl: 56px;
+  }
+}
+
+/* Light Mode Theme (L3) */
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-accent: #D4A820;
+    --color-accent-light: #E8C855;
+    --color-accent-dark: #A67E1A;
+
+    --color-text-primary: #1A1C22;
+    --color-text-secondary: #5A5F6E;
+    --color-text-muted: #8B92A8;
+
+    --color-bg-dark: #F5F5F5;
+    --color-bg-card: #FFFFFF;
+    --color-bg-modal: #FAFAFA;
+    --color-bg-input: #F0F0F0;
+    --color-bg-light: #E8E8E8;
+
+    --color-green: #00A366;
+    --color-green-dark: #006644;
+
+    --color-red: #D32F2F;
+    --color-red-light: #E57373;
+
+    --color-blue: #0066CC;
+    --color-blue-light: #42A5F5;
+
+    --color-purple: #6D28D9;
+    --color-purple-dark: #5B21B6;
+
+    --color-border: rgba(0, 0, 0, 0.1);
+    --color-border-light: rgba(0, 0, 0, 0.05);
+
+    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.08);
+    --shadow-md: 0 4px 24px rgba(0, 0, 0, 0.1);
+    --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.15);
+
+    /* Chess Board Light Mode Adjustments */
+    --chess-selected-bg: rgba(109, 40, 217, 0.35);
+    --chess-move-bg: radial-gradient(circle, rgba(109, 40, 217, 0.45) 22%, transparent 22%);
+    --chess-capture-bg: radial-gradient(circle, rgba(211, 47, 47, 0.4) 100%, transparent 100%);
+    --chess-last-move-bg: rgba(212, 168, 32, 0.15);
+    --chess-save-btn-bg: rgba(245, 245, 245, 0.9);
+    --chess-save-btn-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    --chess-save-btn-active-shadow: 0 0 10px rgba(212, 168, 32, 0.25);
+
+    /* GameSetupModal Light Mode Adjustments */
+    --modal-overlay-bg: rgba(0, 0, 0, 0.5);
+    --modal-launch-border: rgba(212, 168, 32, 0.25);
+    --modal-launch-shadow: 0 0 60px rgba(212, 168, 32, 0.1), 0 20px 40px rgba(0, 0, 0, 0.15);
+    --modal-glow-gradient: conic-gradient(from 0deg, #D4A820, #6D28D9, #D4A820);
+    --modal-player-chip-bg: rgba(212, 168, 32, 0.08);
+    --modal-player-chip-border: rgba(212, 168, 32, 0.2);
+    --modal-countdown-bg: rgba(212, 168, 32, 0.06);
+    --modal-countdown-border: rgba(212, 168, 32, 0.3);
+    --modal-countdown-shadow: 0 0 20px rgba(212, 168, 32, 0.15);
+    --modal-color-active-bg: rgba(212, 168, 32, 0.08);
+    --modal-time-active-bg: rgba(109, 40, 217, 0.12);
+    --modal-time-active-border: rgba(109, 40, 217, 0.3);
+    --modal-time-active-color: #6D28D9;
+    --modal-jarvis-chip-bg: rgba(109, 40, 217, 0.1);
+    --modal-jarvis-chip-border: rgba(109, 40, 217, 0.25);
+    --modal-jarvis-chip-color: #6D28D9;
+    --modal-start-btn-shadow: 0 4px 20px rgba(212, 168, 32, 0.2);
+    --gamesetup-sheet-border: rgba(0, 0, 0, 0.08);
+    --gamesetup-back-btn-border: rgba(0, 0, 0, 0.08);
+
+    /* JarvisInfoModal Light Mode Adjustments */
+    --jarvis-info-overlay-bg: rgba(0, 0, 0, 0.5);
+    --jarvis-info-box-gradient: linear-gradient(145deg, rgba(245, 245, 245, 0.95), rgba(235, 235, 235, 0.95));
+    --jarvis-info-box-border: rgba(109, 40, 217, 0.25);
+    --jarvis-info-box-shadow: 0 16px 40px rgba(0, 0, 0, 0.1);
+    --jarvis-info-close-bg: rgba(0, 0, 0, 0.05);
+    --jarvis-info-tier-dark-bg: rgba(0, 0, 0, 0.03);
+    --jarvis-info-tier-border: rgba(0, 0, 0, 0.08);
+    --jarvis-info-mystic-gradient: linear-gradient(90deg, rgba(212, 168, 32, 0.12), rgba(212, 168, 32, 0.04));
+    --jarvis-info-mystic-border: rgba(212, 168, 32, 0.25);
+    --jarvis-info-mystic-badge-bg: rgba(212, 168, 32, 0.15);
+    --jarvis-tier1-color: #00A366;
+    --jarvis-tier2-color: #0066CC;
+    --jarvis-tier3-color: #D97706;
+    --jarvis-tier4-color: #D32F2F;
+
+    /* GameResultModal Light Mode Adjustments */
+    --result-win-glow: rgba(212, 168, 32, 0.2);
+    --result-win-bg: linear-gradient(160deg, #FFF8E7 0%, #F5F5F5 60%);
+    --result-win-border: rgba(212, 168, 32, 0.25);
+    --result-lose-glow: rgba(211, 47, 47, 0.15);
+    --result-lose-bg: linear-gradient(160deg, #FFEBEE 0%, #F5F5F5 60%);
+    --result-lose-border: rgba(211, 47, 47, 0.2);
+    --result-draw-glow: rgba(90, 95, 110, 0.12);
+    --result-draw-bg: linear-gradient(160deg, #F0F2F8 0%, #F5F5F5 60%);
+    --result-draw-border: rgba(0, 0, 0, 0.12);
+    --result-overlay-bg: rgba(0, 0, 0, 0.5);
+    --result-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+    --result-coins-bg: rgba(0, 0, 0, 0.03);
+    --result-coins-border: rgba(0, 0, 0, 0.08);
+    --result-divider-border: rgba(0, 0, 0, 0.08);
+    --result-total-shadow: 0 0 12px rgba(212, 168, 32, 0.3);
+    --result-share-btn-bg: rgba(109, 40, 217, 0.1);
+    --result-share-btn-border: rgba(109, 40, 217, 0.2);
+    --result-rematch-btn-border: rgba(212, 168, 32, 0.3);
+    --result-save-unsaved-bg: rgba(109, 40, 217, 0.08);
+    --result-save-unsaved-border: rgba(109, 40, 217, 0.2);
+    --result-save-saved-bg: rgba(0, 163, 102, 0.08);
+    --result-save-saved-border: rgba(0, 163, 102, 0.2);
+
+    /* ShopItemCards Light Mode Adjustments */
+    --shop-pieceset-gradient: linear-gradient(135deg, #F5F7FA, #E8EDF9);
+    --shop-pieceset-shadow: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.15));
+    --shop-card-bg: #FFFFFF;
+    --shop-card-preview-bg: #F5F5F5;
+    --shop-board-fallback-light: #F5F8FE;
+    --shop-board-fallback-dark: #A8BCDB;
+    --shop-equipped-badge-bg: rgba(0, 163, 102, 0.06);
+    --shop-equipped-badge-border: rgba(0, 163, 102, 0.15);
+    --shop-unequip-btn-bg: rgba(211, 47, 47, 0.08);
+    --shop-unequip-btn-border: rgba(211, 47, 47, 0.15);
+
+    /* ShopItemCards Board Skins Light Mode Adjustments */
+    --shop-board-classic-light: #F0D9B5;
+    --shop-board-classic-dark: #B58863;
+    --shop-board-chesscoin-light: #E8EDF9;
+    --shop-board-chesscoin-dark: #A8BCDB;
+    --shop-board-marble-light: #E8E0D8;
+    --shop-board-marble-dark: #8C7B6B;
+    --shop-board-gold-light: #F5E6A0;
+    --shop-board-gold-dark: #D4A820;
+    --shop-board-night-light: #2A2A3C;
+    --shop-board-night-dark: #0D0D1A;
+    --shop-board-malachite-light: #A8D5A2;
+    --shop-board-malachite-dark: #2D6A27;
+    --shop-board-neon-light: #1A3A4A;
+    --shop-board-neon-dark: #0A2535;
+    --shop-board-ice-light: #C5DFF0;
+    --shop-board-ice-dark: #5A8DB3;
+
+    /* MoveAnnouncer Light Mode Adjustments */
+    --move-announcer-rainbow-gradient: linear-gradient(90deg, #D32F2F, #E67E22, #D4A820, #00A366, #0066CC, #6D28D9, #D32F2F);
+    --move-announcer-opening-bg: rgba(109, 40, 217, 0.12);
+    --move-announcer-opening-color: #5B21B6;
+    --move-announcer-special-bg: rgba(212, 168, 32, 0.12);
+    --move-announcer-special-color: #A67E1A;
+    --move-announcer-tactics-bg: rgba(211, 47, 47, 0.12);
+    --move-announcer-tactics-color: #C41C3B;
+    --move-announcer-main-text-shadow: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.3));
+    --move-announcer-sub-text-color: rgba(26, 28, 34, 0.8);
+    --move-announcer-sub-text-shadow: drop-shadow(0 1px 4px rgba(0, 0, 0, 0.2));
+
+    /* BattleCard Light Mode Adjustments */
+    --battle-card-border: rgba(0, 0, 0, 0.08);
+    --battle-card-spectate-bg: rgba(212, 168, 32, 0.08);
+    --battle-card-spectate-border: rgba(212, 168, 32, 0.2);
+    --battle-card-save-bg: rgba(109, 40, 217, 0.1);
+    --battle-card-save-color: #5B21B6;
+    --battle-card-save-border: rgba(109, 40, 217, 0.2);
+
+    /* WaitingForOpponent Light Mode Adjustments */
+    --waiting-card-border: rgba(0, 0, 0, 0.08);
+    --waiting-pulse-dot-border: rgba(109, 40, 217, 0.4);
+    --waiting-code-block-bg: rgba(212, 168, 32, 0.05);
+    --waiting-code-block-border: rgba(212, 168, 32, 0.12);
+    --waiting-link-box-bg: rgba(109, 40, 217, 0.06);
+    --waiting-link-box-border: rgba(109, 40, 217, 0.12);
+    --waiting-icon-btn-accent-bg: rgba(212, 168, 32, 0.1);
+    --waiting-icon-btn-green-bg: rgba(0, 163, 102, 0.1);
+    --waiting-cancel-btn-border: rgba(211, 47, 47, 0.15);
+
+    /* Active Sessions Modal Light Mode Adjustments */
+    --active-sessions-backdrop: rgba(0, 0, 0, 0.6);
+    --active-sessions-border-light: rgba(0, 0, 0, 0.08);
+    --active-sessions-border-subtle: rgba(0, 0, 0, 0.05);
+    --active-sessions-my-turn-gradient: linear-gradient(135deg, rgba(0, 163, 102, 0.08), rgba(0, 163, 102, 0.03));
+    --active-sessions-my-turn-border: rgba(0, 163, 102, 0.2);
+    --active-sessions-bot-avatar-bg: rgba(109, 40, 217, 0.1);
+    --active-sessions-bot-avatar-border: rgba(109, 40, 217, 0.2);
+    --active-sessions-status-fallback-color: #5A5F6E;
+
+    /* Attempts Modal Light Mode Adjustments */
+    --attempts-overlay-bg: rgba(0, 0, 0, 0.5);
+    --attempts-border-subtle: rgba(0, 0, 0, 0.05);
+    --attempts-border-light: rgba(0, 0, 0, 0.08);
+    --attempts-close-btn-border: rgba(0, 0, 0, 0.08);
+    --attempts-accent-drop-shadow: drop-shadow(0 0 8px rgba(212, 168, 32, 0.6));
+
+    /* PageLayout Light Mode Adjustments */
+    --page-layout-overlay-bg: rgba(0, 0, 0, 0.6);
+    --page-layout-modal-border: rgba(0, 0, 0, 0.08);
+    --page-layout-modal-shadow: 0 20px 60px rgba(0, 0, 0, 0.12);
+    --page-layout-btn-bg: rgba(0, 0, 0, 0.05);
+    --page-layout-dot-inactive-bg: rgba(0, 0, 0, 0.12);
+
+    /* Badge Detail Modal Light Mode Adjustments */
+    --badge-overlay-bg: rgba(0, 0, 0, 0.6);
+    --badge-btn-border: rgba(0, 0, 0, 0.08);
+    --badge-color-player: #0099CC;
+    --badge-color-warrior: #388E3C;
+    --badge-color-professional: #F57C00;
+    --badge-color-epic: #E53935;
+    --badge-color-legendary: #C2185B;
+
+    /* Victory Screen Light Mode Adjustments */
+    --victory-overlay-bg: rgba(0, 0, 0, 0.7);
+    --victory-countdown-inactive-dot: rgba(0, 0, 0, 0.15);
+    --victory-opponent-text-color: rgba(0, 0, 0, 0.7);
+
+    /* JarvisModal Light Mode Adjustments */
+    --jarvis-modal-overlay-bg: rgba(0, 0, 0, 0.5);
+    --jarvis-modal-sheet-border: rgba(0, 0, 0, 0.08);
+    --jarvis-modal-footer-hint-bg: rgba(109, 40, 217, 0.06);
+    --jarvis-modal-footer-hint-border: rgba(109, 40, 217, 0.12);
+    --jarvis-modal-card-active-bg: rgba(212, 168, 32, 0.06);
+    --jarvis-modal-card-completed-bg: rgba(0, 163, 102, 0.03);
+    --jarvis-modal-card-active-border: rgba(212, 168, 32, 0.25);
+    --jarvis-modal-card-completed-border: rgba(0, 163, 102, 0.12);
+    --jarvis-modal-card-default-border: rgba(0, 0, 0, 0.05);
+    --jarvis-modal-num-completed-bg: rgba(0, 163, 102, 0.12);
+    --jarvis-modal-num-active-bg: rgba(212, 168, 32, 0.12);
+    --jarvis-modal-num-default-border: rgba(0, 0, 0, 0.08);
+
+    /* PromotionModal Light Mode Adjustments */
+    --promotion-overlay-bg: rgba(0, 0, 0, 0.6);
+    --promotion-modal-glow-shadow: rgba(212, 168, 32, 0.3);
+    --promotion-modal-shadow: rgba(0, 0, 0, 0.15);
+    --promotion-title-text-shadow: rgba(212, 168, 32, 0.5);
+    --promotion-btn-border: rgba(0, 0, 0, 0.08);
+    --promotion-chosen-btn-bg: rgba(212, 168, 32, 0.12);
+    --promotion-chosen-btn-shadow: rgba(212, 168, 32, 0.3);
+    --promotion-spark-1: #D4A820;
+    --promotion-spark-2: #D32F2F;
+    --promotion-spark-3: #6D28D9;
+    --promotion-spark-4: #00A366;
+    --promotion-spark-5: #E67E22;
+    --promotion-spark-6: #0066CC;
+    --promotion-spark-7: #C8960A;
+    --promotion-spark-8: #C2185B;
+    --promotion-spark-9: #00996B;
+
+    /* Candle Chart Light Mode Adjustments */
+    --chart-text-color: #5A5F6E;
+    --chart-grid-line: rgba(0, 0, 0, 0.05);
+    --chart-border-subtle: rgba(0, 0, 0, 0.08);
+    --chart-up-color: #00A366;
+    --chart-down-color: #D32F2F;
+
+    /* Avatar Light Mode Adjustments */
+    --avatar-border-subtle: rgba(0, 0, 0, 0.08);
+    --avatar-border-light: rgba(0, 0, 0, 0.12);
+    --avatar-gradient-1: linear-gradient(135deg, #6B4FB5, #8B6FD4);
+    --avatar-gradient-2: linear-gradient(135deg, #4B6B8B, #7B9BBB);
+    --avatar-gradient-3: linear-gradient(135deg, #8B4B5B, #AB7B8B);
+    --avatar-gradient-4: linear-gradient(135deg, #4B7B5B, #7BAB8B);
+
+    /* AvatarCropModal Light Mode Adjustments */
+    --avatar-crop-overlay-bg: rgba(0, 0, 0, 0.5);
+    --avatar-crop-cancel-border: rgba(0, 0, 0, 0.12);
+
+    /* ConfirmModal Light Mode Adjustments */
+    --confirm-cancel-btn-border: rgba(0, 0, 0, 0.08);
+    --confirm-danger-btn-bg: rgba(211, 47, 47, 0.1);
+    --confirm-danger-btn-border: rgba(211, 47, 47, 0.25);
+
+    /* ErrorBoundary Light Mode Adjustments */
+    --error-boundary-stack-bg: rgba(0, 0, 0, 0.08);
+
+    /* BottomNav Light Mode Adjustments */
+    --bottom-nav-active-shadow: 0 2px 8px rgba(212, 168, 32, 0.4);
+
+    /* Toast Light Mode Adjustments */
+    --toast-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+
+    /* MiniProfileSheet Light Mode Adjustments */
+    --mini-profile-overlay-bg: rgba(0, 0, 0, 0.4);
+    --mini-profile-sheet-border: rgba(0, 0, 0, 0.1);
+    --mini-profile-ghost-btn-border: rgba(0, 0, 0, 0.12);
+
+    /* WaitingForOpponent Light Mode Adjustments */
+    --whatsapp-color: #1F7F40;
+    --whatsapp-bg: rgba(31, 127, 64, 0.1);
+
+    /* BattleHistoryPage Light Mode Adjustments */
+    --battle-history-page-info-color: #7A8295;
+    --battle-history-loader-color: #5B21B6;
+
+    /* BattlesPage Light Mode Adjustments */
+    --battles-page-live-indicator-color: #C41C3B;
+    --battles-modal-handle-color: #C8C8D8;
+
+    /* ExchangeTab Light Mode Adjustments */
+    --exchange-ton-connect-gradient: linear-gradient(90deg, #0066CC, #004BA0);
+    --exchange-ton-shop-gradient: linear-gradient(90deg, #0066CC, #004BA0);
+    --shop-ton-wallet-gradient: linear-gradient(135deg, #0066CC, #004587);
+
+    /* StatComponents Light Mode Adjustments */
+    --stat-circle-bg-stroke: #5A6378;
+    --stat-card-border: rgba(0, 0, 0, 0.08);
+
+    /* Modal Light Mode Adjustments */
+    --modal-overlay-bg: rgba(0, 0, 0, 0.5);
+    --modal-border: rgba(0, 0, 0, 0.12);
+    --modal-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+    --modal-divider: rgba(0, 0, 0, 0.08);
+
+    /* WarChallengePopup Light Mode Adjustments */
+    --war-challenge-overlay-bg: rgba(0, 0, 0, 0.5);
+    --war-challenge-modal-border: rgba(211, 47, 47, 0.25);
+    --war-challenge-modal-glow-shadow: rgba(211, 47, 47, 0.12);
+    --war-challenge-modal-shadow: rgba(0, 0, 0, 0.15);
+    --war-challenge-decline-btn-bg: rgba(0, 0, 0, 0.05);
+    --war-challenge-decline-btn-border: rgba(0, 0, 0, 0.08);
+
+    /* PromptModal Light Mode Adjustments */
+    --prompt-overlay-bg: rgba(0, 0, 0, 0.5);
+    --prompt-modal-border: rgba(109, 40, 217, 0.2);
+    --prompt-modal-glow-shadow: rgba(109, 40, 217, 0.15);
+    --prompt-modal-shadow: rgba(0, 0, 0, 0.12);
+    --prompt-close-btn-bg: rgba(0, 0, 0, 0.05);
+    --prompt-close-btn-border: rgba(0, 0, 0, 0.08);
+    --prompt-title-text-shadow: rgba(109, 40, 217, 0.2);
+    --prompt-input-bg: rgba(0, 0, 0, 0.03);
+    --prompt-input-border: rgba(109, 40, 217, 0.2);
+    --prompt-btn-disabled-bg: rgba(109, 40, 217, 0.04);
+    --prompt-btn-active-bg: rgba(109, 40, 217, 0.12);
+    --prompt-btn-border: rgba(109, 40, 217, 0.25);
+    --prompt-cancel-btn-border: rgba(0, 0, 0, 0.08);
+
+    /* PgnReplayModal Light Mode Adjustments */
+    --pgn-replay-overlay-bg: rgba(0, 0, 0, 0.5);
+    --pgn-replay-modal-border: rgba(0, 0, 0, 0.12);
+    --pgn-replay-save-unsaved-bg: rgba(109, 40, 217, 0.08);
+    --pgn-replay-save-unsaved-border: rgba(109, 40, 217, 0.15);
+    --pgn-replay-save-saved-bg: rgba(0, 163, 102, 0.08);
+    --pgn-replay-save-saved-border: rgba(0, 163, 102, 0.15);
+
+    /* BadgeDetailModal Light Mode Adjustments */
+    --badge-overlay-bg: rgba(0, 0, 0, 0.5);
+    --badge-color-player: #0097CC;
+    --badge-color-warrior: #388E3C;
+    --badge-color-professional: #E67E22;
+    --badge-color-epic: #E53935;
+    --badge-color-legendary: #C41C3B;
+    --badge-btn-border: rgba(0, 0, 0, 0.1);
+  }
+}
+
+/* Explicit Light Theme via data-theme attribute */
+[data-theme="light"] {
+  --color-accent: #D4A820;
+  --color-accent-light: #E8C855;
+  --color-accent-dark: #A67E1A;
+
+  --color-text-primary: #1A1C22;
+  --color-text-secondary: #5A5F6E;
+  --color-text-muted: #8B92A8;
+
+  --color-bg-dark: #F5F5F5;
+  --color-bg-card: #FFFFFF;
+  --color-bg-modal: #FAFAFA;
+  --color-bg-input: #F0F0F0;
+  --color-bg-light: #E8E8E8;
+
+  --color-green: #00A366;
+  --color-green-dark: #006644;
+
+  --color-red: #D32F2F;
+  --color-red-light: #E57373;
+
+  --color-blue: #0066CC;
+  --color-blue-light: #42A5F5;
+
+  --color-purple: #6D28D9;
+  --color-purple-dark: #5B21B6;
+
+  --color-border: rgba(0, 0, 0, 0.1);
+  --color-border-light: rgba(0, 0, 0, 0.05);
+
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 24px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.15);
+
+  /* Chess Board Light Mode Adjustments */
+  --chess-selected-bg: rgba(109, 40, 217, 0.35);
+  --chess-move-bg: radial-gradient(circle, rgba(109, 40, 217, 0.45) 22%, transparent 22%);
+  --chess-capture-bg: radial-gradient(circle, rgba(211, 47, 47, 0.4) 100%, transparent 100%);
+  --chess-last-move-bg: rgba(212, 168, 32, 0.15);
+  --chess-save-btn-bg: rgba(245, 245, 245, 0.9);
+  --chess-save-btn-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  --chess-save-btn-active-shadow: 0 0 10px rgba(212, 168, 32, 0.25);
+
+  /* GameSetupModal Light Mode Adjustments */
+  --modal-overlay-bg: rgba(0, 0, 0, 0.5);
+  --modal-launch-border: rgba(212, 168, 32, 0.25);
+  --modal-launch-shadow: 0 0 60px rgba(212, 168, 32, 0.1), 0 20px 40px rgba(0, 0, 0, 0.15);
+  --modal-glow-gradient: conic-gradient(from 0deg, #D4A820, #6D28D9, #D4A820);
+  --modal-player-chip-bg: rgba(212, 168, 32, 0.08);
+  --modal-player-chip-border: rgba(212, 168, 32, 0.2);
+  --modal-countdown-bg: rgba(212, 168, 32, 0.06);
+  --modal-countdown-border: rgba(212, 168, 32, 0.3);
+  --modal-countdown-shadow: 0 0 20px rgba(212, 168, 32, 0.15);
+  --modal-color-active-bg: rgba(212, 168, 32, 0.08);
+  --modal-time-active-bg: rgba(109, 40, 217, 0.12);
+  --modal-time-active-border: rgba(109, 40, 217, 0.3);
+  --modal-time-active-color: #6D28D9;
+  --modal-jarvis-chip-bg: rgba(109, 40, 217, 0.1);
+  --modal-jarvis-chip-border: rgba(109, 40, 217, 0.25);
+  --modal-jarvis-chip-color: #6D28D9;
+  --modal-start-btn-shadow: 0 4px 20px rgba(212, 168, 32, 0.2);
+  --gamesetup-sheet-border: rgba(0, 0, 0, 0.08);
+  --gamesetup-back-btn-border: rgba(0, 0, 0, 0.08);
+
+  /* JarvisInfoModal Light Mode Adjustments */
+  --jarvis-info-overlay-bg: rgba(0, 0, 0, 0.5);
+  --jarvis-info-box-gradient: linear-gradient(145deg, rgba(245, 245, 245, 0.95), rgba(235, 235, 235, 0.95));
+  --jarvis-info-box-border: rgba(109, 40, 217, 0.25);
+  --jarvis-info-box-shadow: 0 16px 40px rgba(0, 0, 0, 0.1);
+  --jarvis-info-close-bg: rgba(0, 0, 0, 0.05);
+  --jarvis-info-tier-dark-bg: rgba(0, 0, 0, 0.03);
+  --jarvis-info-tier-border: rgba(0, 0, 0, 0.08);
+  --jarvis-info-mystic-gradient: linear-gradient(90deg, rgba(212, 168, 32, 0.12), rgba(212, 168, 32, 0.04));
+  --jarvis-info-mystic-border: rgba(212, 168, 32, 0.25);
+  --jarvis-info-mystic-badge-bg: rgba(212, 168, 32, 0.15);
+  --jarvis-tier1-color: #00A366;
+  --jarvis-tier2-color: #0066CC;
+  --jarvis-tier3-color: #D97706;
+  --jarvis-tier4-color: #D32F2F;
+
+  /* GameResultModal Light Mode Adjustments */
+  --result-win-glow: rgba(212, 168, 32, 0.2);
+  --result-win-bg: linear-gradient(160deg, #FFF8E7 0%, #F5F5F5 60%);
+  --result-win-border: rgba(212, 168, 32, 0.25);
+  --result-lose-glow: rgba(211, 47, 47, 0.15);
+  --result-lose-bg: linear-gradient(160deg, #FFEBEE 0%, #F5F5F5 60%);
+  --result-lose-border: rgba(211, 47, 47, 0.2);
+  --result-draw-glow: rgba(90, 95, 110, 0.12);
+  --result-draw-bg: linear-gradient(160deg, #F0F2F8 0%, #F5F5F5 60%);
+  --result-draw-border: rgba(0, 0, 0, 0.12);
+  --result-overlay-bg: rgba(0, 0, 0, 0.5);
+  --result-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+  --result-coins-bg: rgba(0, 0, 0, 0.03);
+  --result-coins-border: rgba(0, 0, 0, 0.08);
+  --result-divider-border: rgba(0, 0, 0, 0.08);
+  --result-total-shadow: 0 0 12px rgba(212, 168, 32, 0.3);
+  --result-share-btn-bg: rgba(109, 40, 217, 0.1);
+  --result-share-btn-border: rgba(109, 40, 217, 0.2);
+  --result-rematch-btn-border: rgba(212, 168, 32, 0.3);
+  --result-save-unsaved-bg: rgba(109, 40, 217, 0.08);
+  --result-save-unsaved-border: rgba(109, 40, 217, 0.2);
+  --result-save-saved-bg: rgba(0, 163, 102, 0.08);
+  --result-save-saved-border: rgba(0, 163, 102, 0.2);
+
+  /* ShopItemCards Light Mode Adjustments */
+  --shop-pieceset-gradient: linear-gradient(135deg, #F5F7FA, #E8EDF9);
+  --shop-pieceset-shadow: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.15));
+  --shop-card-bg: #FFFFFF;
+  --shop-card-preview-bg: #F5F5F5;
+  --shop-board-fallback-light: #F5F8FE;
+  --shop-board-fallback-dark: #A8BCDB;
+  --shop-equipped-badge-bg: rgba(0, 163, 102, 0.06);
+  --shop-equipped-badge-border: rgba(0, 163, 102, 0.15);
+  --shop-unequip-btn-bg: rgba(211, 47, 47, 0.08);
+  --shop-unequip-btn-border: rgba(211, 47, 47, 0.15);
+
+  /* ShopItemCards Board Skins Light Mode via data-theme */
+  --shop-board-classic-light: #F0D9B5;
+  --shop-board-classic-dark: #B58863;
+  --shop-board-chesscoin-light: #E8EDF9;
+  --shop-board-chesscoin-dark: #A8BCDB;
+  --shop-board-marble-light: #E8E0D8;
+  --shop-board-marble-dark: #8C7B6B;
+  --shop-board-gold-light: #F5E6A0;
+  --shop-board-gold-dark: #D4A820;
+  --shop-board-night-light: #2A2A3C;
+  --shop-board-night-dark: #0D0D1A;
+  --shop-board-malachite-light: #A8D5A2;
+  --shop-board-malachite-dark: #2D6A27;
+  --shop-board-neon-light: #1A3A4A;
+  --shop-board-neon-dark: #0A2535;
+  --shop-board-ice-light: #C5DFF0;
+  --shop-board-ice-dark: #5A8DB3;
+
+  /* MoveAnnouncer Light Mode via data-theme */
+  --move-announcer-rainbow-gradient: linear-gradient(90deg, #D32F2F, #E67E22, #D4A820, #00A366, #0066CC, #6D28D9, #D32F2F);
+  --move-announcer-opening-bg: rgba(109, 40, 217, 0.12);
+  --move-announcer-opening-color: #5B21B6;
+  --move-announcer-special-bg: rgba(212, 168, 32, 0.12);
+  --move-announcer-special-color: #A67E1A;
+  --move-announcer-tactics-bg: rgba(211, 47, 47, 0.12);
+  --move-announcer-tactics-color: #C41C3B;
+  --move-announcer-main-text-shadow: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.3));
+  --move-announcer-sub-text-color: rgba(26, 28, 34, 0.8);
+  --move-announcer-sub-text-shadow: drop-shadow(0 1px 4px rgba(0, 0, 0, 0.2));
+
+  /* BattleCard Light Mode via data-theme */
+  --battle-card-border: rgba(0, 0, 0, 0.08);
+  --battle-card-spectate-bg: rgba(212, 168, 32, 0.08);
+  --battle-card-spectate-border: rgba(212, 168, 32, 0.2);
+  --battle-card-save-bg: rgba(109, 40, 217, 0.1);
+  --battle-card-save-color: #5B21B6;
+  --battle-card-save-border: rgba(109, 40, 217, 0.2);
+
+  /* WaitingForOpponent Light Mode via data-theme */
+  --waiting-card-border: rgba(0, 0, 0, 0.08);
+  --waiting-pulse-dot-border: rgba(109, 40, 217, 0.4);
+  --waiting-code-block-bg: rgba(212, 168, 32, 0.05);
+  --waiting-code-block-border: rgba(212, 168, 32, 0.12);
+  --waiting-link-box-bg: rgba(109, 40, 217, 0.06);
+  --waiting-link-box-border: rgba(109, 40, 217, 0.12);
+  --waiting-icon-btn-accent-bg: rgba(212, 168, 32, 0.1);
+  --waiting-icon-btn-green-bg: rgba(0, 163, 102, 0.1);
+  --waiting-cancel-btn-border: rgba(211, 47, 47, 0.15);
+
+  /* Active Sessions Modal Light Mode via data-theme */
+  --active-sessions-backdrop: rgba(0, 0, 0, 0.6);
+  --active-sessions-border-light: rgba(0, 0, 0, 0.08);
+  --active-sessions-border-subtle: rgba(0, 0, 0, 0.05);
+  --active-sessions-my-turn-gradient: linear-gradient(135deg, rgba(0, 163, 102, 0.08), rgba(0, 163, 102, 0.03));
+  --active-sessions-my-turn-border: rgba(0, 163, 102, 0.2);
+  --active-sessions-bot-avatar-bg: rgba(109, 40, 217, 0.1);
+  --active-sessions-bot-avatar-border: rgba(109, 40, 217, 0.2);
+  --active-sessions-status-fallback-color: #5A5F6E;
+
+  /* Attempts Modal Light Mode via data-theme */
+  --attempts-overlay-bg: rgba(0, 0, 0, 0.5);
+  --attempts-border-subtle: rgba(0, 0, 0, 0.05);
+  --attempts-border-light: rgba(0, 0, 0, 0.08);
+  --attempts-close-btn-border: rgba(0, 0, 0, 0.08);
+  --attempts-accent-drop-shadow: drop-shadow(0 0 8px rgba(212, 168, 32, 0.6));
+
+  /* PgnReplayModal Light Mode via data-theme */
+  --pgn-replay-overlay-bg: rgba(0, 0, 0, 0.5);
+  --pgn-replay-modal-border: rgba(0, 0, 0, 0.12);
+  --pgn-replay-save-unsaved-bg: rgba(109, 40, 217, 0.08);
+  --pgn-replay-save-unsaved-border: rgba(109, 40, 217, 0.15);
+  --pgn-replay-save-saved-bg: rgba(0, 163, 102, 0.08);
+  --pgn-replay-save-saved-border: rgba(0, 163, 102, 0.15);
+
+  /* PageLayout Light Mode via data-theme */
+  --page-layout-overlay-bg: rgba(0, 0, 0, 0.6);
+  --page-layout-modal-border: rgba(0, 0, 0, 0.08);
+  --page-layout-modal-shadow: 0 20px 60px rgba(0, 0, 0, 0.12);
+  --page-layout-btn-bg: rgba(0, 0, 0, 0.05);
+  --page-layout-dot-inactive-bg: rgba(0, 0, 0, 0.12);
+
+  /* Badge Detail Modal Light Mode via data-theme */
+  --badge-overlay-bg: rgba(0, 0, 0, 0.6);
+  --badge-btn-border: rgba(0, 0, 0, 0.08);
+  --badge-color-player: #0099CC;
+  --badge-color-warrior: #388E3C;
+  --badge-color-professional: #F57C00;
+  --badge-color-epic: #E53935;
+  --badge-color-legendary: #C2185B;
+
+  /* Victory Screen Light Mode via data-theme */
+  --victory-overlay-bg: rgba(0, 0, 0, 0.7);
+  --victory-countdown-inactive-dot: rgba(0, 0, 0, 0.15);
+  --victory-opponent-text-color: rgba(0, 0, 0, 0.7);
+
+  /* JarvisModal Light Mode via data-theme */
+  --jarvis-modal-overlay-bg: rgba(0, 0, 0, 0.5);
+  --jarvis-modal-sheet-border: rgba(0, 0, 0, 0.08);
+  --jarvis-modal-footer-hint-bg: rgba(109, 40, 217, 0.06);
+  --jarvis-modal-footer-hint-border: rgba(109, 40, 217, 0.12);
+  --jarvis-modal-card-active-bg: rgba(212, 168, 32, 0.06);
+  --jarvis-modal-card-completed-bg: rgba(0, 163, 102, 0.03);
+  --jarvis-modal-card-active-border: rgba(212, 168, 32, 0.25);
+  --jarvis-modal-card-completed-border: rgba(0, 163, 102, 0.12);
+  --jarvis-modal-card-default-border: rgba(0, 0, 0, 0.05);
+  --jarvis-modal-num-completed-bg: rgba(0, 163, 102, 0.12);
+  --jarvis-modal-num-active-bg: rgba(212, 168, 32, 0.12);
+  --jarvis-modal-num-default-border: rgba(0, 0, 0, 0.08);
+
+  /* PromotionModal Light Mode via data-theme */
+  --promotion-overlay-bg: rgba(0, 0, 0, 0.6);
+  --promotion-modal-glow-shadow: rgba(212, 168, 32, 0.3);
+  --promotion-modal-shadow: rgba(0, 0, 0, 0.15);
+  --promotion-title-text-shadow: rgba(212, 168, 32, 0.5);
+  --promotion-btn-border: rgba(0, 0, 0, 0.08);
+  --promotion-chosen-btn-bg: rgba(212, 168, 32, 0.12);
+  --promotion-chosen-btn-shadow: rgba(212, 168, 32, 0.3);
+  --promotion-spark-1: #D4A820;
+  --promotion-spark-2: #D32F2F;
+  --promotion-spark-3: #6D28D9;
+  --promotion-spark-4: #00A366;
+  --promotion-spark-5: #E67E22;
+  --promotion-spark-6: #0066CC;
+  --promotion-spark-7: #C8960A;
+  --promotion-spark-8: #C2185B;
+  --promotion-spark-9: #00996B;
+
+  /* Candle Chart Light Mode via data-theme */
+  --chart-text-color: #5A5F6E;
+  --chart-grid-line: rgba(0, 0, 0, 0.05);
+  --chart-border-subtle: rgba(0, 0, 0, 0.08);
+  --chart-up-color: #00A366;
+  --chart-down-color: #D32F2F;
+
+  /* Avatar Light Mode via data-theme */
+  --avatar-border-subtle: rgba(0, 0, 0, 0.08);
+  --avatar-border-light: rgba(0, 0, 0, 0.12);
+  --avatar-gradient-1: linear-gradient(135deg, #6B4FB5, #8B6FD4);
+  --avatar-gradient-2: linear-gradient(135deg, #4B6B8B, #7B9BBB);
+  --avatar-gradient-3: linear-gradient(135deg, #8B4B5B, #AB7B8B);
+  --avatar-gradient-4: linear-gradient(135deg, #4B7B5B, #7BAB8B);
+
+  /* AvatarCropModal Light Mode via data-theme */
+  --avatar-crop-overlay-bg: rgba(0, 0, 0, 0.5);
+  --avatar-crop-cancel-border: rgba(0, 0, 0, 0.12);
+
+  /* ConfirmModal Light Mode via data-theme */
+  --confirm-cancel-btn-border: rgba(0, 0, 0, 0.08);
+  --confirm-danger-btn-bg: rgba(211, 47, 47, 0.1);
+  --confirm-danger-btn-border: rgba(211, 47, 47, 0.25);
+
+  /* ErrorBoundary Light Mode via data-theme */
+  --error-boundary-stack-bg: rgba(0, 0, 0, 0.08);
+
+  /* BottomNav Light Mode via data-theme */
+  --bottom-nav-active-shadow: 0 2px 8px rgba(212, 168, 32, 0.4);
+
+  /* Toast Light Mode via data-theme */
+  --toast-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+
+  /* MiniProfileSheet Light Mode via data-theme */
+  --mini-profile-overlay-bg: rgba(0, 0, 0, 0.4);
+  --mini-profile-sheet-border: rgba(0, 0, 0, 0.1);
+  --mini-profile-ghost-btn-border: rgba(0, 0, 0, 0.12);
+
+  /* WaitingForOpponent Light Mode via data-theme */
+  --whatsapp-color: #1F7F40;
+  --whatsapp-bg: rgba(31, 127, 64, 0.1);
+
+  /* BattleHistoryPage Light Mode via data-theme */
+  --battle-history-page-info-color: #7A8295;
+  --battle-history-loader-color: #5B21B6;
+
+  /* BattlesPage Light Mode via data-theme */
+  --battles-page-live-indicator-color: #C41C3B;
+  --battles-modal-handle-color: #C8C8D8;
+
+  /* ExchangeTab Light Mode via data-theme */
+  --exchange-ton-connect-gradient: linear-gradient(90deg, #0066CC, #004BA0);
+  --exchange-ton-shop-gradient: linear-gradient(90deg, #0066CC, #004BA0);
+  --shop-ton-wallet-gradient: linear-gradient(135deg, #0066CC, #004587);
+
+  /* StatComponents Light Mode via data-theme */
+  --stat-circle-bg-stroke: #5A6378;
+  --stat-card-border: rgba(0, 0, 0, 0.08);
+
+  /* Modal Light Mode via data-theme */
+  --modal-overlay-bg: rgba(0, 0, 0, 0.5);
+  --modal-border: rgba(0, 0, 0, 0.12);
+  --modal-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+  --modal-divider: rgba(0, 0, 0, 0.08);
+
+  /* WarChallengePopup Light Mode via data-theme */
+  --war-challenge-overlay-bg: rgba(0, 0, 0, 0.5);
+  --war-challenge-modal-border: rgba(211, 47, 47, 0.25);
+  --war-challenge-modal-glow-shadow: rgba(211, 47, 47, 0.12);
+  --war-challenge-modal-shadow: rgba(0, 0, 0, 0.15);
+  --war-challenge-decline-btn-bg: rgba(0, 0, 0, 0.05);
+  --war-challenge-decline-btn-border: rgba(0, 0, 0, 0.08);
+
+  /* PromptModal Light Mode via data-theme */
+  --prompt-overlay-bg: rgba(0, 0, 0, 0.5);
+  --prompt-modal-border: rgba(109, 40, 217, 0.2);
+  --prompt-modal-glow-shadow: rgba(109, 40, 217, 0.15);
+  --prompt-modal-shadow: rgba(0, 0, 0, 0.12);
+  --prompt-close-btn-bg: rgba(0, 0, 0, 0.05);
+  --prompt-close-btn-border: rgba(0, 0, 0, 0.08);
+  --prompt-title-text-shadow: rgba(109, 40, 217, 0.2);
+  --prompt-input-bg: rgba(0, 0, 0, 0.03);
+  --prompt-input-border: rgba(109, 40, 217, 0.2);
+  --prompt-btn-disabled-bg: rgba(109, 40, 217, 0.04);
+  --prompt-btn-active-bg: rgba(109, 40, 217, 0.12);
+  --prompt-btn-border: rgba(109, 40, 217, 0.25);
+  --prompt-cancel-btn-border: rgba(0, 0, 0, 0.08);
+
+  background: var(--color-bg-dark);
+  color: var(--color-text-primary);
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Кликабельные элементы: убираем 300мс задержку двойного тапа iOS + визуальный отклик
+   «Кликаемость кнопок при открытии» (фидбэк Кенана, 2026-04-22) */
+button, [role="button"], a {
+  touch-action: manipulation;
+}
+button:not(:disabled):active, [role="button"]:active {
+  transform: scale(0.97);
+  transition: transform .08s ease-out;
+}
+
+html, body, #root { 
+  width: 100%; 
+  height: 100%; 
+  overflow: hidden; 
+  background: var(--bg, #0B0D11);
+  color: var(--text-primary, #F0F2F8);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Глобальное применение основного шрифта, перебивающее инлайн-хаос */
+div, span, button, input, select, textarea, p { 
+  font-family: inherit; 
+}
+
+/* Шрифтовые классы */
+.font-mono { font-family: 'JetBrains Mono', monospace !important; }
+.font-display { font-family: 'Unbounded', sans-serif !important; }
+
+/* Скрытие скроллбара, но сохранение скроллинга */
+::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+/* ── UI ПРИМИТИВЫ (ПРЕМИУМ СТАНДАРТ) ────────────────────────────────────── */
+
+/* 1. Карточки (Cards) */
+.ui-card {
+  background: var(--bg-card, #13161E);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: var(--radius-l);
+  padding: var(--space-l);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2);
+  transition: transform 0.2s, border-color 0.2s, background 0.2s;
+}
+.ui-card-glass {
+  background: rgba(19, 22, 30, 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border, rgba(255,255,255,0.1));
+  border-radius: var(--radius-xl);
+  padding: var(--space-l);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+/* 2. Кнопки (Buttons) */
+.ui-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-s);
+  border: none;
+  border-radius: var(--radius-m);
+  padding: 14px 20px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  text-decoration: none;
+  user-select: none;
+}
+.ui-btn:active { transform: scale(0.96); }
+.ui-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+.ui-btn-primary {
+  background: var(--accent, #F5C842);
+  color: #000000;
+  box-shadow: 0 4px 12px rgba(245, 200, 66, 0.2);
+}
+.ui-btn-primary:not(:disabled):hover {
+  filter: brightness(1.1);
+  box-shadow: 0 6px 16px rgba(245, 200, 66, 0.35);
+}
+
+.ui-btn-secondary {
+  background: var(--bg-input, #1C2030);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+.ui-btn-secondary:not(:disabled):hover {
+  background: var(--bg-card);
+  border-color: rgba(255,255,255,0.2);
+}
+
+.ui-btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 10px 16px;
+}
+.ui-btn-ghost:not(:disabled):hover {
+  background: rgba(255,255,255,0.05);
+  color: var(--text-primary);
+}
+
+.ui-btn-danger {
+  background: rgba(255, 77, 106, 0.15);
+  color: var(--red);
+  border: 1px solid rgba(255, 77, 106, 0.3);
+}
+.ui-btn-danger:not(:disabled):hover {
+  background: rgba(255, 77, 106, 0.25);
+}
+
+.ui-btn-glass {
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--text-primary);
+}
+
+/* 3. Инпуты (Inputs) */
+.ui-input {
+  width: 100%;
+  background: var(--bg-input, #1C2030);
+  border: 1px solid var(--border, rgba(255,255,255,0.1));
+  border-radius: var(--radius-m);
+  padding: 14px 16px;
+  color: var(--text-primary);
+  font-size: 15px;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.ui-input::placeholder { color: var(--text-muted); }
+.ui-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(245, 200, 66, 0.15);
+}
+
+/* 4. Тексты (Typography) */
+.ui-heading-1 { font-family: 'Unbounded', sans-serif; font-size: 24px; font-weight: 800; line-height: 1.2; letter-spacing: -0.02em; }
+.ui-heading-2 { font-family: 'Inter', sans-serif; font-size: 18px; font-weight: 700; line-height: 1.3; }
+.ui-heading-3 { font-family: 'Inter', sans-serif; font-size: 16px; font-weight: 600; line-height: 1.4; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
+.ui-text-body { font-size: 15px; color: var(--text-secondary); line-height: 1.5; }
+.ui-text-small { font-size: 13px; color: var(--text-muted); }
+
+/* 5. Беджи (Badges) */
+.ui-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: var(--radius-s);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.ui-badge.green { background: rgba(0, 214, 143, 0.15); color: var(--green); border: 1px solid rgba(0, 214, 143, 0.3); }
+.ui-badge.red   { background: rgba(255, 77, 106, 0.15); color: var(--red); border: 1px solid rgba(255, 77, 106, 0.3); }
+.ui-badge.gold  { background: rgba(245, 200, 66, 0.15); color: var(--gold); border: 1px solid rgba(245, 200, 66, 0.3); }
+.ui-badge.blue  { background: rgba(0, 152, 234, 0.15); color: #0098EA; border: 1px solid rgba(0, 152, 234, 0.3); }
+
+/* Модалки и оверлеи */
+.ui-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-xl);
+  animation: fadeIn 0.2s ease-out;
+}
+
+.ui-modal-content {
+  width: 100%;
+  max-width: 400px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: var(--space-xl);
+  box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+  animation: slideUpFade 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+/* ── RESPONSIVE DESIGN SYSTEM (L2) ────────────────────────────────────── */
+
+/* Mobile-first responsive spacing (320px baseline) */
+@media (max-width: 479px) {
+  :root {
+    /* Compress spacing on small phones */
+    --space-xs: 2px;
+    --space-s: 6px;
+    --space-m: 10px;
+    --space-l: 12px;
+    --space-xl: 16px;
+  }
+
+  /* Modal max-width responsive */
+  .ui-modal-content {
+    max-width: 90vw;
+    padding: var(--space-m) var(--space-m);
+  }
+}
+
+@media (min-width: 480px) and (max-width: 767px) {
+  :root {
+    /* Tablet spacing expansion */
+    --space-l: 16px;
+    --space-xl: 24px;
+  }
+
+  .ui-modal-content {
+    max-width: 85vw;
+  }
+}
+
+@media (min-width: 768px) {
+  :root {
+    /* Desktop spacing */
+    --space-l: 20px;
+    --space-xl: 32px;
+  }
+
+  .ui-modal-content {
+    max-width: 420px;
+  }
+}
+
+/* Responsive utility classes */
+.hidden-mobile { display: none; }
+@media (min-width: 768px) {
+  .hidden-mobile { display: block; }
+  .hidden-tablet { display: none; }
+}
+
+/* Responsive grid layouts */
+.grid-auto-2-3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+}
+
+@media (max-width: 479px) {
+  .grid-auto-2-3 {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.grid-auto-2-4 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+}
+
+@media (max-width: 479px) {
+  .grid-auto-2-4 {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (min-width: 480px) and (max-width: 767px) {
+  .grid-auto-2-4 {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+}
+
+.grid-auto-3-6 {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+}
+
+@media (max-width: 479px) {
+  .grid-auto-3-6 {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+/* Promotion grid - 4 items responsive */
+.promotion-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  width: 100%;
+}
+
+@media (max-width: 479px) {
+  .promotion-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* Safe-area support for notched devices */
+.safe-bottom {
+  padding-bottom: max(var(--space-xl), env(safe-area-inset-bottom, var(--space-xl)));
+}
+
+/* Accessibility: Respect prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── BattleCard Responsive Sizing Tokens ────────────────────────────────── */
+:root {
+  --battle-card-player-width: 52px;
+  --battle-card-player-gap: 4px;
+  --battle-card-center-gap: 8px;
+  --battle-card-emoji-size: 18px;
+  --battle-card-status-size: 10px;
+  --battle-card-button-padding: 4px 8px;
+  --battle-card-button-gap: 4px;
+  --battle-card-name-size: 9px;
+  --battle-card-flag-size: 12px;
+  --battle-card-label-size: 9px;
+}
+
+@media (max-width: 479px) {
+  :root {
+    --battle-card-player-width: 40px;
+    --battle-card-player-gap: 2px;
+    --battle-card-center-gap: 4px;
+    --battle-card-emoji-size: 14px;
+    --battle-card-status-size: 9px;
+    --battle-card-button-padding: 2px 6px;
+    --battle-card-button-gap: 2px;
+    --battle-card-name-size: 8px;
+    --battle-card-flag-size: 10px;
+    --battle-card-label-size: 8px;
+  }
+}
+
+/* ── GameResultModal Sizing Tokens ──────────────────────────────────────── */
+:root {
+  --result-emoji-size: 56px;
+  --result-title-size: 24px;
+  --result-label-size: 12px;
+  --result-value-size: 14px;
+  --result-total-size: 18px;
+  --result-button-size: 13px;
+  --result-coins-padding: 14px 16px;
+  --result-coins-gap: 8px;
+}
+
+/* ── Shop Components Sizing Tokens ──────────────────────────────────────── */
+:root {
+  --shop-board-grid-columns: repeat(4, 1fr);
+  --shop-btn-padding: 7px 10px;
+  --shop-btn-font-size: 11px;
+}
+
+@media (max-width: 479px) {
+  :root {
+    --shop-board-grid-columns: repeat(2, 1fr);
+  }
+}
+
+/* ── StatComponents Sizing Tokens ───────────────────────────────────────── */
+:root {
+  --stat-circle-svg-size: 72px;
+  --stat-circle-value-size: 16px;
+  --stat-card-value-size: 20px;
+}
+
+@media (max-width: 479px) {
+  :root {
+    --stat-circle-svg-size: 56px;
+    --stat-circle-value-size: 14px;
+    --stat-card-value-size: 16px;
+  }
+}
+
+/* ── Grid Layout Responsive Tokens ──────────────────────────────────────── */
+:root {
+  --mini-profile-stats-grid: 1fr 1fr 1fr;
+  --promotion-modal-grid: repeat(4, 1fr);
+  --war-challenge-grid: 1fr 1fr;
+}
+
+@media (max-width: 479px) {
+  :root {
+    --mini-profile-stats-grid: 1fr 1fr;
+    --promotion-modal-grid: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 359px) {
+  :root {
+    --war-challenge-grid: 1fr;
+  }
+}
+
+/* ── Avatar Gold Border Responsive Tokens ───────────────────────────────── */
+:root {
+  --avatar-gold-border-width: 1px;
+  --avatar-gold-glow-size: 16px;
+  --avatar-gold-glow-blur: 1px;
+}
+
+@media (max-width: 479px) {
+  :root {
+    --avatar-gold-border-width: 0.5px;
+    --avatar-gold-glow-size: 8px;
+    --avatar-gold-glow-blur: 0.5px;
+  }
+}
+
+/* ── CandleChart Responsive Sizing Tokens ───────────────────────────────── */
+:root {
+  --candle-chart-height: 80px;
+}
+
+@media (max-width: 479px) {
+  :root {
+    --candle-chart-height: 60px;
+  }
+}
+
+/* ── JarvisModal Responsive Sizing Tokens ────────────────────────────────── */
+:root {
+  --jarvis-header-margin-bottom: 20px;
+  --jarvis-title-size: 20px;
+  --jarvis-subtitle-size: 12px;
+  --jarvis-card-gap: 12px;
+  --jarvis-card-num-width: 36px;
+  --jarvis-card-num-height: 36px;
+  --jarvis-card-name-size: 14px;
+  --jarvis-card-info-size: 11px;
+  --jarvis-badge-size: 11px;
+  --jarvis-lock-size: 20px;
+  --jarvis-reward-size: 13px;
+  --jarvis-reward-label-size: 10px;
+  --jarvis-footer-padding: 16px;
+  --jarvis-footer-size: 15px;
+  --jarvis-sheet-max-width: 480px;
+  --jarvis-sheet-padding: 20px 18px;
+  --jarvis-sheet-padding-bottom: 20px;
+  --jarvis-sheet-margin: 0;
+  --jarvis-card-padding: 12px 14px;
+}
+
+@media (max-width: 479px) {
+  :root {
+    --jarvis-header-margin-bottom: 14px;
+    --jarvis-title-size: 16px;
+    --jarvis-subtitle-size: 11px;
+    --jarvis-card-gap: 8px;
+    --jarvis-card-num-width: 32px;
+    --jarvis-card-num-height: 32px;
+    --jarvis-card-name-size: 12px;
+    --jarvis-card-info-size: 10px;
+    --jarvis-badge-size: 10px;
+    --jarvis-lock-size: 16px;
+    --jarvis-reward-size: 11px;
+    --jarvis-reward-label-size: 9px;
+    --jarvis-footer-padding: 12px;
+    --jarvis-footer-size: 13px;
+    --jarvis-sheet-max-width: calc(100% - 20px);
+    --jarvis-sheet-padding: 16px 14px;
+    --jarvis-sheet-padding-bottom: 16px;
+    --jarvis-sheet-margin: 0 10px;
+    --jarvis-card-padding: 10px 10px;
+  }
+}
+
+/* ── Анимации ───────────────────────────────────────────────────────────── */
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slideUpFade { from { opacity: 0; transform: translateY(20px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.05)} }
+@keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }
+@keyframes pulse-glow { 0%,100%{box-shadow:0 0 20px rgba(245,200,66,0.2)} 50%{box-shadow:0 0 40px rgba(245,200,66,0.5)} }
+
+/* Устаревшие шахматные анимации (оставляем для обратной совместимости) */
+@keyframes ring-pulse { 0%,100%{opacity:.4;transform:scale(1)} 50%{opacity:.7;transform:scale(1.03)} }
+@keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+@keyframes slide-up { from{transform:translateY(30px);opacity:0} to{transform:translateY(0);opacity:1} }
+@keyframes fade-in { from{opacity:0} to{opacity:1} }
+@keyframes highlightPulse { 0%,100%{box-shadow:0 0 0 0 rgba(0,214,143,0)} 50%{box-shadow:0 0 0 6px rgba(0,214,143,0.3)} }
+@keyframes floatCoin { 0%{transform:translateY(0);opacity:1} 100%{transform:translateY(-70px);opacity:0} }
+@keyframes pieceBounce { 0%,100%{transform:scale(1)} 40%{transform:scale(1.18)} 70%{transform:scale(0.94)} }
+@keyframes pieceTeleport { 0%{transform:scale(1);opacity:1} 35%{transform:scale(0);opacity:0} 65%{transform:scale(1.15);opacity:0.8} 100%{transform:scale(1);opacity:1} }
+.piece-bounce img  { animation: pieceBounce 0.3s ease-out; }
+.piece-teleport img { animation: pieceTeleport 0.4s ease-in-out; }
+.piece-fade img    { transition: opacity 0.15s ease; }
+@keyframes checkPulse { 0%,100%{background:rgba(255,77,106,0.15)} 50%{background:rgba(255,77,106,0.45)} }
+.check-square { animation: checkPulse 0.8s ease-in-out infinite; }
+@keyframes checkFlash { 0%{opacity:1} 100%{opacity:0} }
+@keyframes captureFlash { 0%{opacity:1} 100%{opacity:0} }
+@keyframes mateBannerIn { from{transform:scale(0.5)translateY(20px);opacity:0} to{transform:scale(1)translateY(0);opacity:1} }
+@keyframes fall { 0% { transform: translateY(0) rotate(0deg); opacity: 1; } 80% { opacity: 1; } 100% { transform: translateY(110vh) rotate(720deg); opacity: 0; } }
+@keyframes starFloat { 0% { transform: scale(0) rotate(0deg); opacity: 0; } 30% { transform: scale(1.3) rotate(180deg); opacity: 1; } 100% { transform: scale(0) rotate(360deg); opacity: 0; } }
+@keyframes ringExpand { 0% { transform: translate(-50%, -50%) scale(0.3); opacity: 1; } 100% { transform: translate(-50%, -50%) scale(3.5); opacity: 0; } }
+@keyframes starBurst { 0% { transform: translate(-50%, -50%) scale(0) rotate(0deg); opacity: 1; } 50% { transform: translate(-50%, -50%) scale(1.8) rotate(180deg); opacity: 1; } 100% { transform: translate(-50%, -50%) scale(0) rotate(360deg); opacity: 0; } }
+@keyframes victoryPulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.85;transform:scale(1.04)} }
+@keyframes neonFlicker { 0%,100%{opacity:1} 20%{opacity:0.7} 40%{opacity:1} 60%{opacity:0.85} 80%{opacity:1} }
+@keyframes fireShake { 0%,100%{transform:translateX(0)} 20%{transform:translateX(-3px)} 40%{transform:translateX(3px)} 60%{transform:translateX(-2px)} 80%{transform:translateX(2px)} }
+@keyframes iceFreeze { 0%{transform:scale(1.1);opacity:0} 100%{transform:scale(1);opacity:1} }
+@keyframes goldShine { 0%,100%{filter:brightness(1)} 50%{filter:brightness(1.4)} }
+@keyframes matrixGlitch { 0%,100%{clip-path:none} 30%{clip-path:inset(10% 0 80% 0)} 60%{clip-path:inset(50% 0 30% 0)} }
+@keyframes bloodDrip { 0%{transform:translateY(-10px);opacity:0} 50%{transform:translateY(3px);opacity:1} 100%{transform:translateY(0);opacity:1} }
+@keyframes galaxySpin { 0%{transform:rotate(-5deg) scale(0.9);opacity:0} 100%{transform:rotate(0deg) scale(1);opacity:1} }
+@keyframes rainbowShift { 0%{background-position:0% 50%} 100%{background-position:200% 50%} }
+@keyframes ghostFade { 0%,100%{opacity:1} 30%{opacity:0.3} 60%{opacity:0.8} }
+@keyframes lightningStrike { 0%{transform:scaleX(0.8);opacity:0} 10%{transform:scaleX(1.1);opacity:1} 20%{opacity:0.7} 30%{opacity:1} 100%{opacity:1} }
+@keyframes dragonBurn { 0%{transform:scale(0.5) rotate(-10deg);opacity:0} 60%{transform:scale(1.05) rotate(2deg);opacity:1} 100%{transform:scale(1) rotate(0);opacity:1} }
+@keyframes fadeSlideUp { 0%{transform:translateY(16px);opacity:0} 30%{transform:translateY(-3px);opacity:1} 100%{transform:translateY(0);opacity:1} }

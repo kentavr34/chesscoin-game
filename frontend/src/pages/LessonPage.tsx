@@ -1,0 +1,487 @@
+﻿/**
+ * LessonPage — страница решения шахматной задачи
+ * Маршрут: /lesson/:puzzleId?difficulty=easy|medium|hard
+ * Также используется для Задачи дня: /lesson/daily
+ */
+import React, { useEffect, useState, useCallback } from 'react';
+import { useParams, useSearchParams, useNavigate, useLocation } from 'react-router-dom';
+import { Chess } from 'chess.js';
+import { Chessboard } from 'react-chessboard';
+import { puzzlesApi, tasksApi, type PuzzleItem } from '@/api';
+import { fmtBalance } from '@/utils/format';
+import { haptic } from '@/lib/haptic';
+import { useUserStore } from '@/store/useUserStore';
+import { authApi } from '@/api';
+import { useT } from '@/i18n/useT';
+import { VictoryScreen } from '@/components/game/VictoryScreen';
+
+// UCI ход → human-readable
+function uciToSan(fen: string, uci: string): string {
+  try {
+    const chess = new Chess(fen);
+    const from = uci.slice(0, 2) as import("chess.js").Square; // R1
+    const to   = uci.slice(2, 4) as import("chess.js").Square; // R1
+    const promo = uci[4] as import("chess.js").Square; // R1
+    const result = chess.move({ from, to, promotion: promo ?? 'q' });
+    return result?.san ?? uci;
+  } catch { return uci; }
+}
+
+type Phase = 'loading' | 'intro' | 'playing' | 'correct' | 'wrong' | 'solved';
+
+export const LessonPage: React.FC = () => {
+  const t = useT();
+  const { puzzleId } = useParams<{ puzzleId: string }>();
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { setUser } = useUserStore();
+
+  // Режим: "learn" (подсказки) или "test" (без подсказок, награда ×1.5)
+  const mode = (searchParams.get('mode') ?? 'learn') as 'learn' | 'test';
+  const isTestMode = mode === 'test';
+
+  const [puzzle, setPuzzle] = useState<PuzzleItem | null>(null);
+  const [phase, setPhase] = useState<Phase>('loading');
+  const [chess, setChess] = useState<Chess>(new Chess());
+  const [fen, setFen] = useState('');
+  const [playerMoves, setPlayerMoves] = useState<string[]>([]);   // UCI ходы игрока
+  const [solutionIdx, setSolutionIdx] = useState(0);              // текущий индекс в решении
+  const [isPlayerTurn, setIsPlayerTurn] = useState(false);
+  const [hint, setHint] = useState<string | null>(null);
+  const [wrongSquare, setWrongSquare] = useState<string | null>(null);
+  const [reward, setReward] = useState<string>('0');
+  // Сторона, с которой смотрит игрок. Берётся из стартовой позиции задачи
+  // и дальше НЕ меняется: доска не должна переворачиваться посреди решения.
+  // Раньше параметра не было вовсе — react-chessboard всегда рисовал со стороны
+  // белых, и при «ходе чёрных» игрок смотрел глазами соперника (Кенан, 30.07).
+  const [boardSide, setBoardSide] = useState<'white' | 'black'>('white');
+  // Ширина контейнера доски. Канон запрещает читать window.innerWidth
+  // (правило 14): окно и контейнер — разные вещи, при боковых отступах
+  // доска вылезала за край. Меряем сам контейнер через ResizeObserver.
+  const boardBoxRef = React.useRef<HTMLDivElement | null>(null);
+  const [boardBoxWidth, setBoardBoxWidth] = useState(360);
+  const [optionSquares, setOptionSquares] = useState<Record<string, React.CSSProperties>>({});
+  const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
+  const [showFanfare, setShowFanfare] = useState(false);
+
+  // Загрузка задачи.
+  //
+  // Зависимость от location.key, а не только от puzzleId: кнопка «Следующая»
+  // ведёт на тот же адрес /lesson/random, puzzleId не меняется — и эффект
+  // не перезапускался. Первый переход срабатывал, дальше кнопка была мёртвой,
+  // приходилось выходить в меню (Кенан 01.08.2026). key меняется при каждом
+  // переходе, даже если адрес тот же.
+  useEffect(() => {
+    loadPuzzle();
+  }, [puzzleId, location.key]);
+
+  const loadPuzzle = async () => {
+    setPhase('loading');
+    try {
+      let data: { puzzle: PuzzleItem };
+      if (puzzleId === 'daily') {
+        data = await puzzlesApi.daily();
+      } else if (puzzleId === 'random') {
+        const diff = (searchParams.get('difficulty') ?? 'medium') as 'easy' | 'medium' | 'hard';
+        data = await puzzlesApi.random(diff);
+      } else {
+        data = await puzzlesApi.get(puzzleId!);
+      }
+      setPuzzle(data.puzzle);
+      initGame(data.puzzle);
+    } catch (e) {
+      console.error(e);
+      setPhase('intro');
+    }
+  };
+
+  // Следим за фактической шириной контейнера: работает и при повороте экрана,
+  // и при смене раскладки, без чтения размеров окна.
+  useEffect(() => {
+    const el = boardBoxRef.current;
+    if (!el) return;
+    const apply = () => setBoardBoxWidth(el.clientWidth || 360);
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [phase]);
+
+  const initGame = (p: PuzzleItem) => {
+    const c = new Chess(p.fen);
+    setChess(c);
+    setFen(p.fen);
+    // Игрок решает за ту сторону, чей ход в стартовой позиции — значит и смотреть
+    // должен с её стороны. Иначе «ход чёрных» показывался глазами белых.
+    setBoardSide(c.turn() === 'b' ? 'black' : 'white');
+    setPlayerMoves([]);
+    setSolutionIdx(0);
+    setIsPlayerTurn(false);
+    setHint(null);
+    setPhase('intro');
+  };
+
+  // Начинаем — ходит СРАЗУ игрок.
+  //
+  // Раньше здесь первым делом проигрывался moves[0] «за противника» — по
+  // лichess-конвенции, где задача начинается с ошибки соперника. Наши задачи
+  // построены иначе: FEN — это уже позиция, где ходит игрок, и moves[0] —
+  // его собственный ход. Из-за подмены доска показывала сторону игрока,
+  // тут же делала за него его же ход и передавала очередь сопернику: игрок
+  // видел «твой ход», а ходить мог только чужими фигурами, и задача
+  // становилась невыполнимой (Кенан 31.07.2026, задача 820 «мат в 1»).
+  const startPuzzle = useCallback(() => {
+    if (!puzzle) return;
+    setPhase('playing');
+    setSolutionIdx(0);
+    setIsPlayerTurn(true);
+  }, [puzzle]);
+
+  const applyOpponentMove = (p: PuzzleItem, c: Chess, idx: number) => {
+    const uci = p.moves[idx];
+    if (!uci) return;
+    const from = uci.slice(0, 2) as import("chess.js").Square; // R1
+    const to   = uci.slice(2, 4) as import("chess.js").Square; // R1
+    const promo = uci[4] as import("chess.js").Square; // R1
+    c.move({ from, to, promotion: promo ?? 'q' });
+    setChess(new Chess(c.fen()));
+    setFen(c.fen());
+    setSolutionIdx(idx + 1);
+    setIsPlayerTurn(true);
+    haptic.impact('light');
+  };
+
+  // Обработка хода игрока
+  const handleSquareClick = (square: string) => {
+    if (!isPlayerTurn || phase !== 'playing') return;
+
+    if (selectedSquare) {
+      // Попытка сделать ход
+      if (selectedSquare === square) {
+        setSelectedSquare(null);
+        setOptionSquares({});
+        return;
+      }
+      tryMove(selectedSquare, square);
+      setSelectedSquare(null);
+      setOptionSquares({});
+    } else {
+      // Выбор фигуры
+      const piece = chess.get(square as import("chess.js").Square);
+      if (!piece || piece.color !== chess.turn()) return;
+      setSelectedSquare(square);
+      showMoveOptions(square);
+    }
+  };
+
+  const showMoveOptions = (square: string) => {
+    const moves = chess.moves({ square: square as import("chess.js").Square, verbose: true });
+    const sq: Record<string, React.CSSProperties> = {
+      [square]: { background: 'rgba(123,97,255,0.4)' },
+    };
+    for (const m of moves) {
+      const isCapture = !!chess.get(m.to as import("chess.js").Square);
+      sq[m.to] = {
+        background: isCapture
+          ? 'radial-gradient(circle, rgba(255,77,106,0.5) 100%, transparent 100%)'
+          : 'radial-gradient(circle, rgba(123,97,255,0.5) 25%, transparent 25%)',
+      };
+    }
+    setOptionSquares(sq);
+  };
+
+  const tryMove = (from: string, to: string) => {
+    if (!puzzle) return;
+
+    const uci = from + to;
+    const expectedUci = puzzle.moves[solutionIdx];
+    if (!expectedUci) return;
+
+    const expectedFrom = expectedUci.slice(0, 2);
+    const expectedTo   = expectedUci.slice(2, 4);
+
+    // Пробуем применить ход
+    try {
+      const tempChess = new Chess(chess.fen());
+      const move = tempChess.move({ from: from as import("chess.js").Square, to: to as import("chess.js").Square, promotion: 'q' });
+      if (!move) return;
+
+      const actualUci = move.from + move.to + (move.promotion ?? '');
+
+      if (from === expectedFrom && to === expectedTo) {
+        // ✓ Правильный ход
+        haptic.impact('medium');
+        setChess(tempChess);
+        setFen(tempChess.fen());
+        const newMoves = [...playerMoves, actualUci];
+        setPlayerMoves(newMoves);
+        const nextIdx = solutionIdx + 1;
+        setHint(null);
+        setWrongSquare(null);
+
+        // Проверяем — конец решения?
+        if (nextIdx >= puzzle.moves.length) {
+          // {t.lesson.solved}
+          setIsPlayerTurn(false);
+          setPhase('correct');
+          submitSolution([...newMoves]);
+        } else {
+          // Противник отвечает
+          setSolutionIdx(nextIdx);
+          setIsPlayerTurn(false);
+          setTimeout(() => {
+            applyOpponentMove(puzzle, tempChess, nextIdx);
+          }, 700);
+        }
+      } else {
+        // ✕ Неверный ход
+        haptic.impact('heavy');
+        setWrongSquare(to);
+        setPhase('wrong');
+        setTimeout(() => {
+          setWrongSquare(null);
+          setPhase('playing');
+        }, 1000);
+        // В режиме тест — без подсказок
+        if (!isTestMode) {
+          const san = uciToSan(chess.fen(), expectedUci);
+          setHint(`${t.lesson.wrong}${san}`);
+        } else {
+          setHint(null);
+        }
+      }
+    } catch {
+      haptic.impact('heavy');
+    }
+  };
+
+  const handlePieceDrop = (from: string, to: string) => {
+    tryMove(from, to);
+    setSelectedSquare(null);
+    setOptionSquares({});
+    return true;
+  };
+
+  const submitSolution = async (moves: string[]) => {
+    if (!puzzle) return;
+    // Ходы игрока — ЧЁТНЫЕ индексы решения (0, 2, 4…): первым ходит он,
+    // соперник отвечает. `moves` уже содержит только сыгранное игроком,
+    // поэтому отправляем как есть — прежний пересчёт индексов сдвигал
+    // список на один ход и валидация на бэкенде не сходилась.
+    const playerOnlyMoves = moves;
+
+    try {
+      const r = await puzzlesApi.complete(puzzle.id, playerOnlyMoves, isTestMode);
+      if (r.correct) {
+        const displayReward = isTestMode && !r.alreadySolved
+          ? String(Math.floor(Number(r.reward) * 1.5))
+          : r.reward;
+        setReward(displayReward);
+        setPhase('solved');
+        setShowFanfare(true);
+        haptic.win?.() ?? haptic.impact('heavy');
+
+        // B.6 MASTER_PLAN: если решали урок из лесенки — поднимаем уровень.
+        // Backend сам валидирует `level === current`, чужой level вернёт ошибку.
+        const lessonParam = searchParams.get('lesson');
+        if (lessonParam) {
+          const lvl = Number(lessonParam);
+          if (Number.isFinite(lvl) && lvl > 0) {
+            // audit-fix 2026-06-12: тихий catch скрывал не-сохранение прогресса —
+            // юзер решал урок, а уровень не поднимался без объяснения.
+            tasksApi.completeLesson(lvl).catch(() => {
+              window.dispatchEvent(new CustomEvent('chesscoin:toast', {
+                detail: { text: 'Прогресс урока не сохранился — проверь уровень в лесенке', type: 'error' },
+              }));
+            });
+          }
+        }
+
+        const updated = await authApi.me();
+        setUser(updated);
+      }
+    } catch (e) {
+      console.error(e);
+      setPhase('solved');
+    }
+  };
+
+  const diffLabel: Record<string, string> = { easy: ' Лёгкая', medium: ' Средняя', hard: 'ґ Сложная' };
+  const getDiff = (rating: number) =>
+    rating < 1200 ? 'easy' : rating < 1700 ? 'medium' : 'hard';
+
+  if (phase === 'loading') {
+    return (
+      <div style={{ position: 'fixed', inset: 0, background: '#0D0D12', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 16 }}>
+        <div style={{ width: 40, height: 40, border: '3px solid rgba(123,97,255,0.3)', borderTopColor: '#7B61FF', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
+        <div style={{ color: '#5A5248', fontSize: 13 }}>Загружаем задачу...</div>
+        <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      </div>
+    );
+  }
+
+  if (!puzzle) {
+    return (
+      <div style={{ position: 'fixed', inset: 0, background: '#0D0D12', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 16, padding: 24 }}>
+        <div style={{ fontSize: 13, color: '#9A9490', textAlign: 'center' }}>Задача не найдена</div>
+        <button onClick={() => navigate('/tasks')} style={goldBtn}>← Назад</button>
+      </div>
+    );
+  }
+
+  const diff = getDiff(puzzle.rating);
+  const boardSize = Math.min(boardBoxWidth - 32, 380);
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: '#0D0D12', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+      {/* Топбар */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px 10px', paddingTop: 'max(14px, env(safe-area-inset-top,14px))', borderBottom: '1px solid rgba(255,255,255,0.07)', flexShrink: 0 }}>
+        <button onClick={() => navigate(-1)} style={backBtn}>←</button>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontFamily: "'Unbounded',sans-serif", fontSize: 13, fontWeight: 800, color: '#EAE2CC' }}>
+            {puzzle.isDaily ? `${t.lesson.daily}` : `${t.lesson.title}`}
+          </div>
+          <div style={{ fontSize: 10, color: '#9A9490', marginTop: 2 }}>
+            {diffLabel[diff]} · Рейтинг {puzzle.rating} · +{fmtBalance(puzzle.reward)}
+          </div>
+        </div>
+        <div style={{ width: 36 }} />
+      </div>
+
+      {/* Тематики */}
+      {puzzle.themes.length > 0 && (
+        <div style={{ display: 'flex', gap: 6, padding: '8px 18px', flexWrap: 'wrap', flexShrink: 0 }}>
+          {puzzle.themes.slice(0, 4).map(theme => (
+            <span key={theme} style={{ padding: '3px 8px', background: 'rgba(123,97,255,0.12)', border: '1px solid rgba(123,97,255,0.2)', borderRadius: 8, fontSize: 10, color: '#9B85FF', fontWeight: 600 }}>
+              {theme}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Доска */}
+      <div ref={boardBoxRef} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0 16px', gap: 16 }}>
+        <div style={{ position: 'relative' }}>
+          <Chessboard
+            id="lesson-board"
+            position={fen}
+            boardOrientation={boardSide}
+            boardWidth={boardSize}
+            onSquareClick={handleSquareClick}
+            onPieceDrop={(from, to) => { handlePieceDrop(from, to); return true; }}
+            arePiecesDraggable={isPlayerTurn && phase === 'playing'}
+            customDarkSquareStyle={{ backgroundColor: '#B7C0D8' }}
+            customLightSquareStyle={{ backgroundColor: '#E8EDF9' }}
+            customSquareStyles={{
+              ...optionSquares,
+              ...(selectedSquare ? { [selectedSquare]: { background: 'rgba(123,97,255,0.45)' } } : {}),
+              ...(wrongSquare ? { [wrongSquare]: { background: 'rgba(255,77,106,0.5)' } } : {}),
+            }}
+            customBoardStyle={{ borderRadius: 12 }}
+          />
+        </div>
+
+        {/* Статус */}
+        <div style={{ textAlign: 'center', minHeight: 52 }}>
+          {phase === 'intro' && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+              <div style={{ fontSize: 13, color: '#9A9490' }}>
+                {chess.turn() === 'w' ? t.lesson.whiteToMove : t.lesson.blackToMove}
+              </div>
+              <button onClick={startPuzzle} style={goldBtn}>▶ Начать решение</button>
+            </div>
+          )}
+          {phase === 'playing' && (
+            <div style={{ fontSize: 13, color: isPlayerTurn ? '#F0C85A' : '#9A9490', fontWeight: isPlayerTurn ? 700 : 400 }}>
+              {isPlayerTurn ? t.lesson.yourTurn : t.lesson.opponentThinking}
+            </div>
+          )}
+          {phase === 'wrong' && (
+            <div style={{ fontSize: 13, color: '#FF5B5B', fontWeight: 700, animation: 'shake .3s' }}>
+              ✕ Неверно! {hint}
+            </div>
+          )}
+          {phase === 'correct' && (
+            <div style={{ fontSize: 13, color: '#3DBA7A', fontWeight: 700 }}>
+              ✓ Правильно! Проверяем...
+            </div>
+          )}
+          {phase === 'solved' && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+              <div style={{ fontFamily: "'Unbounded',sans-serif", fontSize: 18, fontWeight: 800, color: '#F0C85A' }}>
+                {t.lesson.solved}
+              </div>
+              {BigInt(reward || '0') > 0n && (
+                <div style={{ fontSize: 15, color: '#3DBA7A', fontWeight: 700 }}>
+                  {t.lesson.reward(fmtBalance(reward))}
+                </div>
+              )}
+              {puzzle.completed && BigInt(reward || '0') === 0n && (
+                <div style={{ fontSize: 12, color: '#9A9490' }}>Уже решал — повтор без награды</div>
+              )}
+              <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
+                <button onClick={() => navigate('/tasks')} style={ghostBtn}>← К заданиям</button>
+                <button
+                  onClick={() => {
+                    const diff = getDiff(puzzle.rating);
+                    // Из урока идём к следующему уроку по порядку, из обычной
+                    // задачи — к следующей случайной той же сложности.
+                    const lessonParam = searchParams.get('lesson');
+                    const lvl = lessonParam ? Number(lessonParam) : NaN;
+                    if (Number.isFinite(lvl) && lvl > 0) {
+                      navigate(`/lesson/random?difficulty=${diff}&lesson=${lvl + 1}`);
+                    } else {
+                      const mode = searchParams.get('mode');
+                      navigate(`/lesson/random?difficulty=${diff}${mode ? `&mode=${mode}` : ''}`);
+                    }
+                  }}
+                  style={goldBtn}
+                >
+                  {t.lesson.next}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {showFanfare && (
+        <VictoryScreen 
+          result="win" 
+          earned={reward} 
+          opponentName={t.lesson.title} 
+          onDone={() => setShowFanfare(false)} 
+        />
+      )}
+
+      <style>{`
+        @keyframes shake {
+          0%,100%{transform:translateX(0)}
+          25%{transform:translateX(-6px)}
+          75%{transform:translateX(6px)}
+        }
+      `}</style>
+    </div>
+  );
+};
+
+// Styles
+const goldBtn: React.CSSProperties = {
+  padding: '11px 22px', background: '#F0C85A', borderRadius: 14,
+  border: 'none', color: '#0D0D12', fontSize: 13, fontWeight: 700,
+  cursor: 'pointer', fontFamily: 'inherit',
+};
+const ghostBtn: React.CSSProperties = {
+  padding: '11px 18px', background: 'transparent',
+  border: '1px solid rgba(255,255,255,0.15)',
+  borderRadius: 14, color: '#9A9490', fontSize: 13, fontWeight: 600,
+  cursor: 'pointer', fontFamily: 'inherit',
+};
+const backBtn: React.CSSProperties = {
+  width: 36, height: 36, borderRadius: 11,
+  background: 'linear-gradient(135deg,#141018,#0F0E18)', border: '1px solid rgba(255,255,255,0.13)',
+  display: 'flex', alignItems: 'center', justifyContent: 'center',
+  fontSize: 18, cursor: 'pointer', color: '#9A9490', fontFamily: 'inherit',
+};

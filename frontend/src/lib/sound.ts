@@ -1,0 +1,276 @@
+/**
+ * Sound effects via Web Audio API — no audio files needed.
+ * Checks useSettingsStore.soundEnabled before playing.
+ */
+
+let ctx: AudioContext | null = null;
+
+function getCtx(): AudioContext {
+  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  // Resume if suspended (browser autoplay policy)
+  if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+  return ctx;
+}
+
+// Разблокируем AudioContext при первом касании/клике пользователя.
+// Без этого на мобильных браузерах (особенно iOS) звуки могут не воспроизводиться.
+if (typeof window !== 'undefined') {
+  const _unlock = () => {
+    try {
+      const c = getCtx();
+      if (c.state !== 'running') c.resume().catch(() => {});
+    } catch {}
+  };
+  document.addEventListener('touchstart', _unlock, { once: true, passive: true });
+  document.addEventListener('touchend', _unlock, { once: true, passive: true });
+  document.addEventListener('click', _unlock, { once: true, passive: true });
+}
+
+function isSoundEnabled(): boolean {
+  try {
+    // Read directly from localStorage to avoid circular import
+    const raw = localStorage.getItem('chesscoin-settings');
+    if (!raw) return true;
+    const parsed = JSON.parse(raw);
+    return parsed?.state?.soundEnabled !== false;
+  } catch {
+    return true;
+  }
+}
+
+
+/**
+ * Звуковые наборы из магазина (Кенан 03.08.2026: звук — такой же товар, как
+ * доска или фигуры). Раньше звуки были одинаковыми у всех.
+ *
+ * Набор не подменяет звуки целиком, а задаёт характер: высоту, форму волны и
+ * громкость. Так один и тот же «ход» звучит деревянным стуком, хрустальным
+ * звоном или восьмибитным писком.
+ *
+ * Имя набора кладёт в localStorage App.tsx при загрузке пользователя —
+ * напрямую читать стор нельзя, будет круговой импорт.
+ */
+export interface SoundProfile {
+  pitch: number;      // множитель частоты
+  gain: number;       // множитель громкости
+  tone: OscillatorType;
+  noise: number;      // множитель шумовой составляющей
+}
+
+const SOUND_PROFILES: Record<string, SoundProfile> = {
+  'Classic Sound':     { pitch: 1,    gain: 1,    tone: 'triangle', noise: 1    },
+  'Wooden Sound':      { pitch: 0.7,  gain: 1.1,  tone: 'sine',     noise: 1.3  },
+  'Crystal Sound':     { pitch: 1.6,  gain: 0.9,  tone: 'sine',     noise: 0.35 },
+  'Retro 8-bit Sound': { pitch: 1.25, gain: 0.85, tone: 'square',   noise: 0.5  },
+  'Thunder Sound':     { pitch: 0.55, gain: 1.35, tone: 'sawtooth', noise: 1.6  },
+};
+
+function profile(): SoundProfile {
+  try {
+    const name = localStorage.getItem('chesscoin-sound-set');
+    if (name) {
+      const exact = SOUND_PROFILES[name];
+      if (exact) return exact;
+      const wanted = name.trim().toLowerCase();
+      for (const key of Object.keys(SOUND_PROFILES)) {
+        if (key.toLowerCase() === wanted) return SOUND_PROFILES[key]!;
+      }
+    }
+  } catch {}
+  return SOUND_PROFILES['Classic Sound']!;
+}
+
+type OscType = OscillatorType;
+
+interface ToneOpts {
+  freq: number;
+  type?: OscType;
+  gainStart?: number;
+  gainEnd?: number;
+  duration?: number;
+  startTime?: number;
+}
+
+function playTone(opts: ToneOpts): void {
+  const p = profile();
+  const { freq: baseFreq, type: baseType = 'sine', gainStart: baseGain = 0.3,
+          gainEnd = 0, duration = 0.12, startTime = 0 } = opts;
+  // Набор задаёт характер: высоту, форму волны и громкость.
+  const freq = baseFreq * p.pitch;
+  const type = p.tone === 'triangle' ? baseType : p.tone;
+  const gainStart = Math.min(baseGain * p.gain, 0.9);
+  const c = getCtx();
+  const osc = c.createOscillator();
+  const gain = c.createGain();
+
+  osc.connect(gain);
+  gain.connect(c.destination);
+
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, c.currentTime + startTime);
+
+  gain.gain.setValueAtTime(gainStart, c.currentTime + startTime);
+  gain.gain.exponentialRampToValueAtTime(
+    Math.max(gainEnd, 0.0001),
+    c.currentTime + startTime + duration
+  );
+
+  osc.start(c.currentTime + startTime);
+  osc.stop(c.currentTime + startTime + duration + 0.01);
+}
+
+function playNoise(gainLevel = 0.15, duration = 0.05, startTime = 0): void {
+  gainLevel = Math.min(gainLevel * profile().noise, 0.9);
+  const c = getCtx();
+  const bufSize = c.sampleRate * duration;
+  const buf = c.createBuffer(1, bufSize, c.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+
+  const src = c.createBufferSource();
+  src.buffer = buf;
+
+  const gain = c.createGain();
+  gain.gain.setValueAtTime(gainLevel, c.currentTime + startTime);
+  gain.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + startTime + duration);
+
+  // Band-pass filter to shape the click
+  const filter = c.createBiquadFilter();
+  filter.type = 'bandpass';
+  filter.frequency.value = 1200;
+  filter.Q.value = 0.8;
+
+  src.connect(filter);
+  filter.connect(gain);
+  gain.connect(c.destination);
+  src.start(c.currentTime + startTime);
+}
+
+export const sound = {
+  /** Piece moved (soft click) */
+  move() {
+    if (!isSoundEnabled()) return;
+    try {
+      playNoise(0.18, 0.06);
+      playTone({ freq: 440, type: 'triangle', gainStart: 0.08, gainEnd: 0, duration: 0.1 });
+    } catch {}
+  },
+
+  /** Piece captured — удар + низкий thud + металлический звон */
+  capture() {
+    if (!isSoundEnabled()) return;
+    try {
+      // Удар — шум + низкий thud
+      playNoise(0.45, 0.12);
+      playTone({ freq: 160, type: 'sawtooth', gainStart: 0.25, gainEnd: 0, duration: 0.18 });
+      // Металлический отзвук
+      playTone({ freq: 800, type: 'sine', gainStart: 0.08, gainEnd: 0, duration: 0.22, startTime: 0.05 });
+      playTone({ freq: 600, type: 'sine', gainStart: 0.05, gainEnd: 0, duration: 0.3, startTime: 0.08 });
+    } catch {}
+  },
+
+  /** Check — two-tone alert */
+  check() {
+    if (!isSoundEnabled()) return;
+    try {
+      playTone({ freq: 880, type: 'square', gainStart: 0.12, gainEnd: 0, duration: 0.08 });
+      playTone({ freq: 1100, type: 'square', gainStart: 0.12, gainEnd: 0, duration: 0.08, startTime: 0.1 });
+    } catch {}
+  },
+
+  /** Game start — ascending two notes */
+  gameStart() {
+    if (!isSoundEnabled()) return;
+    try {
+      playTone({ freq: 523, type: 'triangle', gainStart: 0.2, gainEnd: 0, duration: 0.15 });
+      playTone({ freq: 659, type: 'triangle', gainStart: 0.2, gainEnd: 0, duration: 0.2, startTime: 0.18 });
+    } catch {}
+  },
+
+  /** Victory — ascending arpeggio */
+  win() {
+    if (!isSoundEnabled()) return;
+    try {
+      const notes = [523, 659, 784, 1047];
+      notes.forEach((freq, i) => {
+        playTone({ freq, type: 'triangle', gainStart: 0.22, gainEnd: 0, duration: 0.18, startTime: i * 0.13 });
+      });
+    } catch {}
+  },
+
+  /** Defeat — dramatic descending minor scale */
+  lose() {
+    if (!isSoundEnabled()) return;
+    try {
+      // Тяжёлый удар в начале
+      playNoise(0.32, 0.18);
+      playTone({ freq: 180, type: 'sawtooth', gainStart: 0.28, gainEnd: 0, duration: 0.45 });
+      // Нисходящая минорная гамма — трагичная мелодия
+      playTone({ freq: 370, type: 'triangle', gainStart: 0.22, gainEnd: 0, duration: 0.3, startTime: 0.12 });
+      playTone({ freq: 311, type: 'triangle', gainStart: 0.20, gainEnd: 0, duration: 0.3, startTime: 0.38 });
+      playTone({ freq: 277, type: 'triangle', gainStart: 0.18, gainEnd: 0, duration: 0.3, startTime: 0.62 });
+      playTone({ freq: 233, type: 'sine',     gainStart: 0.22, gainEnd: 0, duration: 0.45, startTime: 0.88 });
+      // Финальный глубокий аккорд — замирание
+      playTone({ freq: 185, type: 'sine',     gainStart: 0.20, gainEnd: 0, duration: 0.9,  startTime: 1.18 });
+      playTone({ freq: 147, type: 'triangle', gainStart: 0.12, gainEnd: 0, duration: 0.9,  startTime: 1.18 });
+    } catch {}
+  },
+
+  /** Draw — neutral two-tone */
+  draw() {
+    if (!isSoundEnabled()) return;
+    try {
+      playTone({ freq: 440, type: 'sine', gainStart: 0.15, gainEnd: 0, duration: 0.18 });
+      playTone({ freq: 440, type: 'sine', gainStart: 0.1, gainEnd: 0, duration: 0.18, startTime: 0.22 });
+    } catch {}
+  },
+
+  /** Castle (special move) */
+  castle() {
+    if (!isSoundEnabled()) return;
+    try {
+      playNoise(0.18, 0.06);
+      playNoise(0.12, 0.05, 0.07);
+      playTone({ freq: 392, type: 'triangle', gainStart: 0.1, gainEnd: 0, duration: 0.15, startTime: 0.05 });
+    } catch {}
+  },
+
+  /** Promotion dialog появился — торжественный нарастающий звук */
+  promote() {
+    if (!isSoundEnabled()) return;
+    try {
+      // Нарастающая фанфара — пешка дошла!
+      [392, 523, 659, 784, 1047].forEach((freq, i) => {
+        playTone({ freq, type: 'triangle', gainStart: 0.18, gainEnd: 0, duration: 0.14, startTime: i * 0.1 });
+      });
+      // Низкий торжественный акцент
+      playTone({ freq: 196, type: 'sawtooth', gainStart: 0.12, gainEnd: 0, duration: 0.4, startTime: 0.1 });
+    } catch {}
+  },
+
+  /** Промоция подтверждена — игрок выбрал фигуру. YES! момент */
+  promotionConfirmed() {
+    if (!isSoundEnabled()) return;
+    try {
+      // Три восходящих аккорда — "да!" торжество
+      const chord1 = [523, 659, 784];   // C-E-G мажор
+      const chord2 = [659, 784, 988];   // E-G-B
+      const chord3 = [784, 988, 1175];  // G-B-D — кульминация
+
+      chord1.forEach(f => playTone({ freq: f, type: 'triangle', gainStart: 0.2, gainEnd: 0, duration: 0.2 }));
+      chord2.forEach(f => playTone({ freq: f, type: 'triangle', gainStart: 0.22, gainEnd: 0, duration: 0.2, startTime: 0.22 }));
+      chord3.forEach(f => playTone({ freq: f, type: 'triangle', gainStart: 0.28, gainEnd: 0, duration: 0.35, startTime: 0.44 }));
+
+      // Финальный блеск — высокая нота
+      playTone({ freq: 2093, type: 'sine', gainStart: 0.15, gainEnd: 0, duration: 0.4, startTime: 0.6 });
+    } catch {}
+  },
+
+  /** Generic UI click / tap */
+  tap() {
+    if (!isSoundEnabled()) return;
+    try {
+      playNoise(0.1, 0.04);
+    } catch {}
+  },
+};

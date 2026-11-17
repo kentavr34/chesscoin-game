@@ -1,0 +1,1541 @@
+import React, { useEffect, useState, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { PageLayout } from '@/components/layout/PageLayout';
+import { Avatar } from '@/components/ui/Avatar';
+import { warsApi } from '@/api';
+import { useUserStore } from '@/store/useUserStore';
+import { fmtBalance } from '@/utils/format';
+import { useT, useText } from '@/i18n/useT';
+import { useConfirm } from '@/components/ui/ConfirmModal';
+import { CoinIcon } from '@/components/ui/CoinIcon';
+import { DonateModal } from '@/components/ui/DonateModal';
+import { CountryFlag } from '@/components/ui/CountryFlag';
+import { IcoSwords, IcoTrophy } from '@/components/icons/TournamentIcons';
+import { IcoEye, IcoHandshake, IcoSave, IcoSearch, IcoStats, IcoClose, IcoCheck } from '@/components/icons/UiIcons';
+import { getSocket } from '@/api/socket';
+
+const COUNTRY_ENTRY_FEE = 10_000n;
+
+const toast = (text: string, type: 'error' | 'success' | 'info' = 'error') =>
+  window.dispatchEvent(new CustomEvent('chesscoin:toast', { detail: { text, type } }));
+
+// Тикающий таймер войны
+const WarCountdown: React.FC<{ initialSeconds: number; active: boolean }> = ({ initialSeconds, active }) => {
+  const [secs, setSecs] = useState(initialSeconds);
+  useEffect(() => {
+    setSecs(initialSeconds);
+    if (!active || initialSeconds <= 0) return;
+    const t = setInterval(() => setSecs(s => Math.max(0, s - 1)), 1000);
+    return () => clearInterval(t);
+  }, [initialSeconds, active]);
+  return <>{formatTime(secs)}</>;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WARSINTROMODAL
+// ─────────────────────────────────────────────────────────────────────────────
+const WarsIntroModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+  const t = useT();
+  return (
+    <div data-onboarding style={overlayStyle} onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div style={{ ...modalCardStyle, maxWidth: 420, margin: 'auto', borderRadius: 24 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 18 }}>
+          <div style={{ fontSize: 20, fontFamily: "'Inter',sans-serif", fontWeight: 800, color: '#EAE2CC', letterSpacing: '-.01em' }}>
+            {t.wars.warIntro.title}
+          </div>
+          <button onClick={onClose} style={closeBtnStyle}><IcoClose size={14} /></button>
+        </div>
+        <div style={{ fontSize: 13, color: '#7A7875', lineHeight: 1.75 }}>
+          <p style={{ marginBottom: 10 }}>{withBold(t.wars.warIntro.p1)}</p>
+          <p style={{ marginBottom: 10 }}>{withBold(t.wars.warIntro.p2)}</p>
+          <p style={{ marginBottom: 10 }}>{withBold(t.wars.warIntro.p3)}</p>
+          <p style={{ marginBottom: 10 }}>{withBold(t.wars.warIntro.p4)}</p>
+          <p>{withBold(t.wars.warIntro.p5)}</p>
+        </div>
+        <button onClick={onClose} style={{ ...greenBtnFull, marginTop: 20 }}>
+          {t.wars.warIntro.btn}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DECLARE WAR MODAL
+// ─────────────────────────────────────────────────────────────────────────────
+const WAR_DURATIONS_VALUES = [3600, 43200, 86400, 604800] as const;
+
+const DeclareWarModal: React.FC<{
+  myCountryId: string;
+  onClose: () => void;
+  onDeclared: () => void;
+}> = ({ myCountryId, onClose, onDeclared }) => {
+  const t = useT();
+  const [countries, setCountries] = useState<any[]>([]);
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState<string | null>(null);
+  const [duration, setDuration] = useState(86400);
+  const [loading, setLoading] = useState(false);
+
+  const DURATIONS = WAR_DURATIONS_VALUES.map(v => ({
+    label: t.wars.declareModal.durations[String(v) as keyof typeof t.wars.declareModal.durations],
+    value: v,
+  }));
+
+  useEffect(() => {
+    warsApi.countries('alpha').then(r => setCountries(r.countries.filter((c: any) => c.id !== myCountryId)));
+  }, [myCountryId]);
+
+  const filtered = countries.filter(c =>
+    c.nameRu.toLowerCase().includes(search.toLowerCase()) ||
+    c.nameEn.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const handleDeclare = async () => {
+    if (!selected) return;
+    setLoading(true);
+    try {
+      await warsApi.declare(selected, duration);
+      toast(t.wars.warDeclared, 'success');
+      onDeclared();
+      onClose();
+    } catch (e: any) {
+      toast(e.message ?? t.common.error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div data-onboarding style={overlayStyle} onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div style={bottomSheetStyle}>
+        <div style={handleBar} />
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: '#EAE2CC', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ color: '#3DBA7A', display: 'inline-flex', verticalAlign: 'middle' }}><IcoSwords size={16} /></span> {t.wars.declareModal.title}
+          </div>
+          <button onClick={onClose} style={closeBtnStyle}><IcoClose size={14} /></button>
+        </div>
+
+        <input
+          placeholder={t.wars.declareModal.search}
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          style={inputStyle}
+        />
+
+        {/* Список стран — растягивается на всю свободную высоту */}
+        <div style={{ flex: 1, minHeight: 120, overflowY: 'auto', marginBottom: 10 }}>
+          {filtered.map(c => (
+            <div
+              key={c.id}
+              onClick={() => setSelected(c.id)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px',
+                borderRadius: 10, marginBottom: 4, cursor: 'pointer',
+                transition: 'all .15s',
+                background: selected === c.id ? 'rgba(61,186,122,0.10)' : 'rgba(255,255,255,0.03)',
+                border: `.5px solid ${selected === c.id ? 'rgba(61,186,122,0.38)' : 'rgba(154,148,144,.18)'}`,
+              }}
+            >
+              <CountryFlag code={c.code ?? c.id} size={26} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: '#EAE2CC', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.nameRu}</div>
+                <div style={{ fontSize: 10, color: '#7A7875' }}>{t.wars.fighters(c.memberCount)} • {t.common.wins}: {c.wins}</div>
+              </div>
+              {selected === c.id && <span style={{ color: '#3DBA7A', display: 'inline-flex', alignItems: 'center' }}><IcoCheck size={16} color="#3DBA7A" /></span>}
+            </div>
+          ))}
+        </div>
+
+        {/* Длительность — компактные кнопки flex:1 */}
+        <div style={{ ...sectionLabelStyle, marginBottom: 6, flexShrink: 0 }}>
+          {t.wars.declareModal.duration}
+        </div>
+        <div style={{ display: 'flex', gap: 5, marginBottom: 12, flexShrink: 0 }}>
+          {DURATIONS.map(d => (
+            <button
+              key={d.value}
+              onClick={() => setDuration(d.value)}
+              style={{
+                flex: 1, padding: '7px 4px', borderRadius: 9, cursor: 'pointer',
+                fontFamily: 'inherit', fontSize: 10, fontWeight: 700,
+                background: duration === d.value ? 'rgba(61,186,122,.12)' : 'rgba(255,255,255,.04)',
+                border: `.5px solid ${duration === d.value ? 'rgba(61,186,122,.4)' : 'rgba(154,148,144,.2)'}`,
+                color: duration === d.value ? '#3DBA7A' : '#9A9490',
+                transition: 'all .15s', whiteSpace: 'nowrap',
+              }}
+            >
+              {d.label}
+            </button>
+          ))}
+        </div>
+
+        {/* CTA — фиксирован снизу модала */}
+        <button
+          onClick={handleDeclare}
+          disabled={!selected || loading}
+          style={{ ...greenBtnFull, opacity: !selected || loading ? 0.5 : 1, flexShrink: 0 }}
+        >
+          {loading ? t.wars.declareModal.declaring : t.wars.declareModal.btn}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COUNTRY DETAIL MODAL
+// ─────────────────────────────────────────────────────────────────────────────
+const CountryDetailModal: React.FC<{
+  countryId: string;
+  activeWarId?: string | null;
+  onClose: () => void;
+  onJoined: () => void;
+}> = ({ countryId, onClose, onJoined }) => {
+  const t = useT();
+  const navigate = useNavigate();
+  const { user } = useUserStore();
+  // Клик по чужому аватару/имени бойца → его профиль (с автозакрытием модала страны).
+  // Защита: если uid пустой или это сам пользователь — не переходим.
+  const goProfile = (uid?: string | null) => {
+    console.log('[profileNav] Wars CountryDetailModal click', { uid, currentUserId: user?.id });
+    if (!uid || uid === user?.id) {
+      console.log('[profileNav] Wars — REJECTED', { uid, reason: !uid ? 'no id' : 'self' });
+      return;
+    }
+    navigate(`/profile/${uid}`);
+    onClose();
+  };
+  const [data, setData] = useState<{ country: any; members: any[]; isCommander: boolean } | null>(null);
+  const [joining, setJoining] = useState(false);
+  const [donateAmt, setDonateAmt] = useState('');
+  const [donating, setDonating] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const [showDonateModal, setShowDonateModal] = useState(false);
+  const [confirm, ConfirmDialog] = useConfirm();
+  // B.3: pending-заявки — главком видит и решает
+  const [pending, setPending] = useState<Array<{ id: string; joinedAt: string; user: { id: string; firstName: string; username?: string | null; avatar?: string | null; elo: number; referralCount: number } }>>([]);
+  const [pendingBusy, setPendingBusy] = useState<string | null>(null);
+
+  // Счёт против каждой другой страны (Кенан 30.07.2026). Считается из
+  // завершённых войн, поэтому не может разойтись с историей партий.
+  const rivalsTitle = useText('wars.rivals.title', 'Счёт против стран');
+  const rivalsWarsLabel = useText('wars.rivals.wars', 'войн');
+  const rivalsBattlesLabel = useText('wars.rivals.battles', 'партий');
+  const [rivals, setRivals] = useState<Array<{
+    country: { id: string; nameRu: string; flag: string };
+    warsWon: number; warsLost: number; battlesWon: number; battlesLost: number;
+  }>>([]);
+
+  useEffect(() => {
+    warsApi.country(countryId).then(setData).catch(console.error);
+    warsApi.rivals(countryId).then(r => setRivals(r.rivals)).catch(() => {});
+  }, [countryId]);
+
+  // Грузим pending только если я ГК этой страны
+  useEffect(() => {
+    if (!data?.isCommander) { setPending([]); return; }
+    warsApi.pending().then(r => setPending(r.pending)).catch(() => {});
+  }, [data?.isCommander]);
+
+  // B.3 push: слушаем socket-уведомления.
+  // ГК получает `country:join-request` → перезагружаем pending.
+  // Заявитель получает `country:join-approved` / `country:join-rejected` →
+  // перезагружаем myMembership.
+  useEffect(() => {
+    if (!user?.id) return;
+    const sock = getSocket();
+    const channel = `user:${user.id}`;
+    const handler = (payload: any) => {
+      const evType = payload?.type;
+      if (evType === 'country:join-request' && data?.isCommander) {
+        warsApi.pending().then(r => setPending(r.pending)).catch(() => {});
+      } else if (evType === 'country:join-approved' || evType === 'country:join-rejected') {
+        warsApi.country(countryId).then(setData).catch(() => {});
+        toast(evType === 'country:join-approved' ? t.wars.joinApproved : t.wars.joinRejected, evType === 'country:join-approved' ? 'success' : 'info');
+      } else if (evType === 'country:commander-assigned') {
+        // PR-3: первый зашедший в страну → автоматически главком
+        toast(payload?.message ?? t.wars.youAreCommander, 'success');
+        warsApi.country(countryId).then(setData).catch(() => {});
+      }
+    };
+    sock.on(channel, handler);
+    return () => { sock.off(channel, handler); };
+  }, [user?.id, data?.isCommander, countryId]);
+
+  const handleApprove = async (memberId: string) => {
+    setPendingBusy(memberId);
+    try {
+      await warsApi.approve(memberId);
+      toast(t.wars.joined, 'success');
+      setPending(p => p.filter(x => x.id !== memberId));
+      warsApi.country(countryId).then(setData);
+    } catch (e: any) {
+      toast(e.message ?? t.common.error);
+    } finally {
+      setPendingBusy(null);
+    }
+  };
+
+  const handleReject = async (memberId: string) => {
+    setPendingBusy(memberId);
+    try {
+      await warsApi.reject(memberId);
+      setPending(p => p.filter(x => x.id !== memberId));
+    } catch (e: any) {
+      toast(e.message ?? t.common.error);
+    } finally {
+      setPendingBusy(null);
+    }
+  };
+
+  const handleJoin = async () => {
+    const entryFee = data?.country?.entryFee
+      ? BigInt(data.country.entryFee)
+      : COUNTRY_ENTRY_FEE;
+    const feeStr = fmtBalance(entryFee.toString());
+    const ok = await confirm({
+      title: t.wars.joinConfirm(data?.country?.nameRu ?? t.common.error),
+      message: t.wars.joinFeeDesc(feeStr),
+      okLabel: t.wars.joinFeeBtn(feeStr),
+      cancelLabel: t.wars.cancel,
+    });
+    if (!ok) return;
+    setJoining(true);
+    try {
+      const res = await warsApi.join(countryId) as any;
+      // PR-3: первый зашедший в страну → автоматически главком (APPROVED + взнос
+      // списан сразу). Иначе PENDING-заявка ждёт одобрения главкома.
+      if (res.isCommander) {
+        toast(t.wars.youAreCommander, 'success');
+      } else {
+        toast(res.pending ? t.wars.joinPendingSent : t.wars.joined, 'success');
+      }
+      onJoined();
+      onClose();
+    } catch (e: any) {
+      const code = e?.error ?? e?.message ?? '';
+      if (String(code).includes('INSUFFICIENT_BALANCE')) {
+        toast(t.wars.insufficientFor(fmtBalance(entryFee.toString())));
+      } else if (String(code).includes('COUNTRY_FULL')) {
+        toast(t.wars.countryFull);
+      } else if (String(code).includes('WAR_IN_PROGRESS')) {
+        toast(t.wars.cantSwitchDuringWar);
+      } else {
+        toast(e.message ?? t.common.error);
+      }
+    } finally {
+      setJoining(false);
+    }
+  };
+
+  const handleDonate = async (amount: number) => {
+    setDonating(true);
+    try {
+      await warsApi.donate(countryId, amount);
+      toast(t.wars.btnDonate, 'success');
+      setDonateAmt('');
+      setShowDonateModal(false);
+      warsApi.country(countryId).then(setData);
+    } catch (e: any) {
+      toast(e.message ?? t.common.error);
+    } finally {
+      setDonating(false);
+    }
+  };
+
+  const handleLeave = async () => {
+    const fee = data?.country?.myMembership?.contribution
+      ? BigInt(data.country.myMembership.contribution)
+      : COUNTRY_ENTRY_FEE;
+    const ok = await confirm({
+      title: t.wars.leaveCountryConfirm,
+      message: t.wars.leaveContribLost(fmtBalance(fee.toString())),
+      danger: true,
+      okLabel: t.wars.leaveBtnConfirm,
+      cancelLabel: t.wars.stayBtn,
+    });
+    if (!ok) return;
+    setLeaving(true);
+    try {
+      await warsApi.leave();
+      toast(t.wars.leaveCountry, 'success');
+      onJoined();
+      onClose();
+    } catch (e: any) {
+      toast(e.message ?? t.common.error);
+    } finally {
+      setLeaving(false);
+    }
+  };
+
+  const c = data?.country;
+  const members = data?.members ?? [];
+  const isMine = c?.myMembership != null;
+  const myStatus = c?.myMembership?.status ?? 'APPROVED'; // backward compat
+  const isApproved = isMine && myStatus === 'APPROVED';
+  const isPending = isMine && myStatus === 'PENDING';
+  const hasActiveWar = !!c?.activeWar;
+  const entryFeeStr = c?.entryFee ?? COUNTRY_ENTRY_FEE.toString();
+
+  return (
+    <div data-onboarding style={overlayStyle} onClick={(e) => e.target === e.currentTarget && onClose()}>
+      {ConfirmDialog}
+      {showDonateModal && (
+        <DonateModal
+          onClose={() => setShowDonateModal(false)}
+          onSubmit={handleDonate}
+          currentPool={c?.treasury}
+        />
+      )}
+      <div style={{ ...bottomSheetStyle, maxHeight: '90vh' }}>
+        <div style={handleBar} />
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <CountryFlag code={c?.code ?? c?.id ?? '??'} size={32} />
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: '#EAE2CC' }}>{c?.nameRu ?? '...'}</div>
+              <div style={{ fontSize: 10, color: '#7A7875' }}>{c?.nameEn ?? ''}</div>
+            </div>
+          </div>
+          <button onClick={onClose} style={closeBtnStyle}><IcoClose size={14} /></button>
+        </div>
+
+        {c && (
+          <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+            <div style={statBoxStyle}>
+              <div style={statLabelStyle}>{t.wars.treasury}</div>
+              <div style={{ ...statValueStyle, color: '#D4A843' }}>{fmtBalance(c.treasury)}</div>
+            </div>
+            <div style={statBoxStyle}>
+              <div style={statLabelStyle}>{t.wars.wins}</div>
+              <div style={{ ...statValueStyle, color: '#3DBA7A' }}>{String(c.wins)}</div>
+            </div>
+            <div style={statBoxStyle}>
+              <div style={statLabelStyle}>{t.wars.fightersLabel}</div>
+              <div style={{ ...statValueStyle, color: '#EAE2CC' }}>{c.memberCount} / {c.maxMembers}</div>
+            </div>
+          </div>
+        )}
+
+        {c?.activeWar && (
+          <div style={{ padding: '10px 14px', background: 'rgba(255,77,106,0.07)', border: '.5px solid rgba(255,77,106,0.25)', borderRadius: 14, marginBottom: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#FF4D6A', marginBottom: 4 }}>{t.wars.warInProgress}</div>
+            <div style={{ fontSize: 12, color: '#EAE2CC' }}>
+              {c.activeWar.attackerCountry?.nameRu} vs {c.activeWar.defenderCountry?.nameRu}
+            </div>
+            <div style={{ fontSize: 11, color: '#7A7875', marginTop: 2 }}>
+              {c.activeWar.attackerWins} : {c.activeWar.defenderWins}
+            </div>
+          </div>
+        )}
+
+        {!isMine && (
+          <button onClick={handleJoin} disabled={joining} style={{ ...greenBtnFull, marginBottom: 14, opacity: joining ? 0.6 : 1 }}>
+            {joining ? '...' : `${t.wars.joinCountryBtn} · ${fmtBalance(entryFeeStr)}`}
+          </button>
+        )}
+        {isPending && (
+          <div style={{ padding: '10px 14px', background: 'rgba(240,200,90,.07)', border: '.5px solid rgba(240,200,90,.28)', borderRadius: 12, marginBottom: 14, fontSize: 12, color: '#F0C85A', fontWeight: 600, textAlign: 'center' }}>
+            {t.wars.youArePending}
+          </div>
+        )}
+        {isApproved && (
+          <>
+            <div style={{ padding: '8px 12px', background: 'rgba(61,186,122,0.07)', border: '.5px solid rgba(61,186,122,0.28)', borderRadius: 12, marginBottom: 10, fontSize: 12, color: '#3DBA7A', fontWeight: 600 }}>
+              {t.wars.youAreFighter}
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+              <button
+                onClick={() => setShowDonateModal(true)}
+                disabled={donating}
+                style={{
+                  flex: 1, padding: '12px 14px',
+                  background: 'linear-gradient(135deg,#2A1E08,#4A3810)',
+                  color: '#F0C85A', border: '.5px solid rgba(212,168,67,.42)', borderRadius: 12,
+                  fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
+                  opacity: donating ? 0.6 : 1,
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                }}
+              >
+                <CoinIcon size={16} />
+                {donating ? '...' : t.wars.btnDonate}
+              </button>
+              <button
+                onClick={handleLeave}
+                disabled={leaving}
+                style={{
+                  padding: '10px 12px', background: 'rgba(255,77,106,0.07)', color: '#FF4D6A',
+                  border: '.5px solid rgba(255,77,106,0.25)', borderRadius: 12, fontSize: 12,
+                  fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', transition: 'all .15s',
+                }}
+              >
+                {leaving ? '...' : t.wars.btnLeave}
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* B.3: главком видит список заявок на вступление */}
+        {data?.isCommander && pending.length > 0 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ ...sectionLabelStyle, marginBottom: 8 }}>
+              {t.wars.pendingRequests} ({pending.length})
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {pending.map(p => (
+                <div key={p.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px',
+                  background: 'rgba(240,200,90,.05)', border: '.5px solid rgba(240,200,90,.22)',
+                  borderRadius: 10,
+                }}>
+                  <div onClick={() => goProfile(p.user.id)} style={{ cursor: 'pointer' }}>
+                    <Avatar user={p.user as any} size="s" />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#EAE2CC', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {p.user.firstName}{p.user.username ? ` · @${p.user.username}` : ''}
+                    </div>
+                    <div style={{ fontSize: 10, color: '#7A7875', marginTop: 1 }}>
+                      ELO {p.user.elo} · {t.wars.referralCountShort(p.user.referralCount)}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleApprove(p.id)}
+                    disabled={pendingBusy === p.id}
+                    style={{
+                      padding: '6px 10px', borderRadius: 8,
+                      background: 'rgba(61,186,122,.12)', color: '#3DBA7A',
+                      border: '.5px solid rgba(61,186,122,.32)', fontSize: 11, fontWeight: 700,
+                      cursor: 'pointer', fontFamily: 'inherit',
+                      opacity: pendingBusy === p.id ? 0.5 : 1,
+                    }}
+                  >
+                    {t.wars.approve}
+                  </button>
+                  <button
+                    onClick={() => handleReject(p.id)}
+                    disabled={pendingBusy === p.id}
+                    style={{
+                      padding: '6px 10px', borderRadius: 8,
+                      background: 'rgba(255,77,106,.07)', color: '#FF4D6A',
+                      border: '.5px solid rgba(255,77,106,.28)', fontSize: 11, fontWeight: 700,
+                      cursor: 'pointer', fontFamily: 'inherit',
+                      opacity: pendingBusy === p.id ? 0.5 : 1,
+                    }}
+                  >
+                    {t.wars.reject}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Счёт против других стран (Кенан 30.07.2026). Пусто, пока страна
+            ни с кем не воевала — лишний заголовок в этом случае не рисуем. */}
+        {rivals.length > 0 && (
+          <>
+            <div style={{ ...sectionLabelStyle, marginBottom: 10 }}>
+              <span>{rivalsTitle}</span>
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              {rivals.map(r => (
+                <div key={r.country.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px',
+                  background: 'rgba(255,255,255,.02)', border: '.5px solid rgba(255,255,255,.05)',
+                  borderRadius: 12, marginBottom: 6,
+                }}>
+                  <span style={{ fontSize: 18, flexShrink: 0 }}>{r.country.flag}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#EAE2CC', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {r.country.nameRu}
+                    </div>
+                    <div style={{ fontSize: 10, color: '#7A7875', marginTop: 1 }}>
+                      {rivalsWarsLabel}: {r.warsWon}–{r.warsLost}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                    <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 15, fontWeight: 800, color: r.battlesWon >= r.battlesLost ? '#3DBA7A' : '#FF8080' }}>
+                      {r.battlesWon}:{r.battlesLost}
+                    </div>
+                    <div style={{ fontSize: 9, color: '#5A5248' }}>{rivalsBattlesLabel}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        <div style={{ ...sectionLabelStyle, marginBottom: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span>{t.wars.fightersLabel} ({members.length})</span>
+          {hasActiveWar && (
+            <span style={{ fontSize: 9, fontWeight: 700, color: '#FF4D6A', letterSpacing: '.06em' }}>
+              {t.wars.sortByWins}
+            </span>
+          )}
+        </div>
+
+        <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+          {members.map((m: any, i: number) => (
+            <div key={m.id} style={{
+              display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0',
+              borderBottom: '.5px solid rgba(154,148,144,.12)',
+            }}>
+              {/* Звание/ранг */}
+              {m.isCommander ? (
+                <div style={{
+                  flexShrink: 0, padding: '2px 5px', borderRadius: 6,
+                  background: 'linear-gradient(135deg,#F0C85A,#D4A843)',
+                  color: '#0D0D12', fontSize: 9, fontWeight: 900, letterSpacing: '.04em',
+                  whiteSpace: 'nowrap',
+                }}>
+                  {t.wars.gk}
+                </div>
+              ) : (
+                <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 12, color: '#7A7875', width: 20, textAlign: 'center', flexShrink: 0 }}>
+                  {i + 1}
+                </span>
+              )}
+
+              <div
+                onClick={() => goProfile(m.userId ?? m.user?.id)}
+                style={{ cursor: 'pointer' }}
+              >
+                <Avatar user={m.user} size="s" />
+              </div>
+
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div
+                  style={{
+                    fontSize: 13, fontWeight: 600,
+                    color: m.isCommander ? '#D4A843' : '#EAE2CC',
+                    cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    display: 'flex', alignItems: 'center', gap: 6,
+                  }}
+                  onClick={() => goProfile(m.userId ?? m.user?.id)}
+                >
+                  <span>{m.user?.firstName} {m.user?.lastName ?? ''}</span>
+                  {m.isCommander && (
+                    <span style={{ fontSize: 9, color: '#D4A843', fontWeight: 700 }}>
+                      {t.wars.commanderLabel} · {t.wars.referralCountShort(m.referralCount ?? 0)}
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: 10, color: '#7A7875', display: 'flex', gap: 8, marginTop: 1 }}>
+                  <span>ELO {m.user?.elo ?? '—'}</span>
+                  <span style={{ color: '#3DBA7A' }}>{m.warWins}W</span>
+                  <span style={{ color: '#FF4D6A' }}>{m.warLosses}L</span>
+                  {hasActiveWar && (m.currentWarWins ?? 0) > 0 && (
+                    <span style={{ color: '#F0C85A', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                      {/* Inline-SVG up-triangle (заменяет ▲ — без юникод-символов в UI) */}
+                      <svg width="8" height="8" viewBox="0 0 10 10" fill="currentColor" style={{ flexShrink: 0 }}>
+                        <polygon points="5,1 9,9 1,9"/>
+                      </svg>
+                      {t.wars.warWinsCount(m.currentWarWins)}
+                    </span>
+                  )}
+                </div>
+                {BigInt(m.contribution ?? '0') > 0n && (
+                  <div style={{ fontSize: 9, color: '#D4A843', marginTop: 2, fontFamily: "'JetBrains Mono',monospace" }}>
+                    {t.wars.contributionLabel} {fmtBalance(m.contribution)}
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+          {members.length === 0 && (
+            <div style={{ textAlign: 'center', color: '#7A7875', padding: 24, fontSize: 13 }}>{t.wars.noFighters}</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WAR DETAIL MODAL (просмотр партий войны)
+// ─────────────────────────────────────────────────────────────────────────────
+const WarDetailModal: React.FC<{ warId: string; onClose: () => void }> = ({ warId, onClose }) => {
+  const t = useT();
+  const navigate = useNavigate();
+  const { user } = useUserStore();
+  const [data, setData] = useState<any>(null);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [countdown, setCountdown] = useState(0);
+
+  useEffect(() => {
+    warsApi.warDetail(warId).then(r => {
+      setData(r.war);
+      setCountdown((r.war?.secondsLeft as number) ?? 0);
+    }).catch(console.error);
+  }, [warId]);
+
+  // Тикаем таймер каждую секунду
+  useEffect(() => {
+    if (!data || data.status !== 'IN_PROGRESS') return;
+    const t = setInterval(() => setCountdown(s => Math.max(0, s - 1)), 1000);
+    return () => clearInterval(t);
+  }, [data?.status]);
+
+  const handleSave = async (sessionId: string) => {
+    setSaving(sessionId);
+    try {
+      await warsApi.saveGame(sessionId);
+      toast(t.wars.battleSaved, 'success');
+    } catch (e: any) {
+      toast(e.message ?? t.common.error);
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const war = data;
+
+  return (
+    <div data-onboarding style={overlayStyle} onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div style={{ ...bottomSheetStyle, maxHeight: '90vh' }}>
+        <div style={handleBar} />
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: '#EAE2CC', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ color: '#3DBA7A', display: 'inline-flex', verticalAlign: 'middle' }}><IcoSwords size={16} /></span> {t.wars.warDetail}
+          </div>
+          <button onClick={onClose} style={closeBtnStyle}><IcoClose size={14} /></button>
+        </div>
+
+        {!war && <div style={{ textAlign: 'center', color: '#7A7875', padding: 32 }}>{t.common.loading}</div>}
+
+        {war && (
+          <>
+            {/* Счёт */}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16,
+              padding: '14px 16px', background: 'linear-gradient(135deg,#141018,#0F0E18)',
+              border: '.5px solid rgba(154,148,144,.22)', borderRadius: 16,
+            }}>
+              <div style={{ textAlign: 'center', flex: 1 }}>
+                <div style={{ fontSize: 24 }}>{war.attackerCountry?.flag}</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#EAE2CC', marginTop: 4 }}>{war.attackerCountry?.nameRu}</div>
+              </div>
+              <div style={{ textAlign: 'center', padding: '0 12px' }}>
+                <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 28, fontWeight: 800, color: '#D4A843' }}>
+                  {war.attackerWins} : {war.defenderWins}
+                </div>
+                <div style={{ fontSize: 10, color: war.status === 'IN_PROGRESS' ? '#3DBA7A' : '#7A7875', marginTop: 2, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  {war.status === 'IN_PROGRESS' ? (
+                    <>
+                      {/* Inline-SVG таймер (заменяет ⏱ — правило UI без эмодзи) */}
+                      <svg width="11" height="11" viewBox="0 0 20 20" fill="none" style={{ flexShrink: 0 }}>
+                        <circle cx="10" cy="11" r="6.5" stroke="currentColor" strokeWidth="1.6"/>
+                        <path d="M10 7v4l2.5 1.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
+                        <path d="M8 2.5h4M10 2.5v2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
+                      </svg>
+                      {formatTime(countdown)}
+                    </>
+                  ) : t.wars.warFinished}
+                </div>
+              </div>
+              <div style={{ textAlign: 'center', flex: 1 }}>
+                <div style={{ fontSize: 24 }}>{war.defenderCountry?.flag}</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#EAE2CC', marginTop: 4 }}>{war.defenderCountry?.nameRu}</div>
+              </div>
+            </div>
+
+            {war.winnerCountryId && (
+              <div style={{ padding: '8px 14px', background: 'rgba(61,186,122,0.07)', border: '.5px solid rgba(61,186,122,0.28)', borderRadius: 12, marginBottom: 12, textAlign: 'center' }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#3DBA7A' }}>
+                  {t.wars.winner}: {war.winnerCountryId === war.attackerCountryId ? war.attackerCountry?.nameRu : war.defenderCountry?.nameRu}
+                </div>
+              </div>
+            )}
+
+            {/* Auto-matchmaking indicator */}
+            {war.status === 'IN_PROGRESS' && (
+              <div style={{ padding: '8px 12px', background: 'rgba(61,186,122,0.05)', border: '.5px solid rgba(61,186,122,0.22)', borderRadius: 12, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#3DBA7A', animation: 'pulse 2s ease-in-out infinite', flexShrink: 0 }} />
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: '#3DBA7A' }}>{t.wars.autoMatchmaking}</div>
+                  <div style={{ fontSize: 10, color: '#7A7875' }}>
+                    {t.wars.queueStatus(
+                      (war.battles ?? []).filter((b: any) => b.status === 'IN_PROGRESS').length,
+                      10
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Список партий */}
+            <div style={{ ...sectionLabelStyle, marginBottom: 10 }}>
+              {t.wars.battles} ({war.battles?.length ?? 0})
+            </div>
+            <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+              {(war.battles ?? [])
+                .sort((a: any, b: any) => {
+                  // Active matches first, user's own match at the very top
+                  const aIsMyMatch = a.attackerId === user?.id || a.defenderId === user?.id;
+                  const bIsMyMatch = b.attackerId === user?.id || b.defenderId === user?.id;
+                  if (aIsMyMatch && !bIsMyMatch) return -1;
+                  if (!aIsMyMatch && bIsMyMatch) return 1;
+                  const aActive = a.status === 'IN_PROGRESS' ? 0 : 1;
+                  const bActive = b.status === 'IN_PROGRESS' ? 0 : 1;
+                  return aActive - bActive;
+                })
+                .map((b: any) => {
+                const p1 = b.session?.sides?.[0]?.player;
+                const p2 = b.session?.sides?.[1]?.player;
+                const isDone = b.status === 'FINISHED';
+                const isMyMatch = b.attackerId === user?.id || b.defenderId === user?.id;
+                return (
+                  <div key={b.id} style={{
+                    display: 'flex', alignItems: 'center', gap: 8, padding: '10px 0',
+                    borderBottom: '.5px solid rgba(154,148,144,.1)',
+                    ...(isMyMatch && !isDone ? {
+                      background: 'rgba(61,186,122,0.05)', borderRadius: 12,
+                      padding: '10px 8px', margin: '2px -8px',
+                      border: '.5px solid rgba(61,186,122,0.22)',
+                    } : {}),
+                  }}>
+                    <div style={{ cursor: 'pointer' }} onClick={() => p1 && navigate(`/profile/${p1.id}`)}>
+                      <Avatar user={p1} size="s" />
+                    </div>
+                    <div style={{ flex: 1, textAlign: 'center' }}>
+                      {isMyMatch && !isDone && (
+                        <div style={{ fontSize: 8, fontWeight: 800, color: '#3DBA7A', letterSpacing: '.1em', marginBottom: 1 }}>{t.wars.yourMatch}</div>
+                      )}
+                      <div style={{ fontSize: 11, fontWeight: 700, color: isDone ? (b.winnerId === b.attackerId ? '#3DBA7A' : '#FF4D6A') : '#D4A843' }}>
+                        {isDone ? (b.winnerId === b.attackerId ? t.wars.victory : t.wars.defeat) : t.wars.inGame}
+                      </div>
+                      <div style={{ fontSize: 9, color: '#7A7875', marginTop: 2 }}>VS</div>
+                    </div>
+                    <div style={{ cursor: 'pointer' }} onClick={() => p2 && navigate(`/profile/${p2.id}`)}>
+                      <Avatar user={p2} size="s" />
+                    </div>
+                    {!isDone && b.sessionId && isMyMatch && (
+                      <button
+                        onClick={() => { onClose(); navigate(`/game/${b.sessionId}`); }}
+                        style={{
+                          padding: '5px 10px', background: 'linear-gradient(135deg,#0A1F14,#0D2B1A)',
+                          color: '#3DBA7A', border: '.5px solid rgba(61,186,122,.38)', borderRadius: 8,
+                          fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
+                          whiteSpace: 'nowrap', transition: 'all .15s',
+                        }}
+                      >
+                        {t.wars.goToMatch}
+                      </button>
+                    )}
+                    {!isDone && b.sessionId && !isMyMatch && (
+                      <button
+                        onClick={() => { onClose(); navigate(`/game/${b.sessionId}?spectate=1`); }}
+                        style={{
+                          padding: '5px 8px', background: 'rgba(61,186,122,0.07)', color: '#3DBA7A',
+                          border: '.5px solid rgba(61,186,122,0.28)', borderRadius: 8, fontSize: 11,
+                          cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap', transition: 'all .15s',
+                          display: 'inline-flex', alignItems: 'center', gap: 5,
+                        }}
+                      >
+                        <IcoEye size={12} /> {t.wars.spectateMatch}
+                      </button>
+                    )}
+                    {b.session?.pgn && isDone && (
+                      <button
+                        onClick={() => handleSave(b.sessionId)}
+                        disabled={saving === b.sessionId}
+                        style={{
+                          padding: '5px 8px', background: 'rgba(154,148,144,0.08)', color: '#7A7875',
+                          border: '.5px solid rgba(154,148,144,0.22)', borderRadius: 8, fontSize: 11,
+                          cursor: 'pointer', fontFamily: 'inherit', transition: 'all .15s',
+                        }}
+                      >
+                        {saving === b.sessionId ? '...' : <IcoSave size={12} />}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+              {!(war.battles?.length) && (
+                <div style={{ textAlign: 'center', color: '#7A7875', padding: 24, fontSize: 13 }}>{t.wars.noBattlesYet}</div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN WARSPAGE
+// ─────────────────────────────────────────────────────────────────────────────
+type Tab = 'countries' | 'active' | 'history';
+
+
+// Тексты вводного окна содержат <b>…</b> для выделения. React выводит строку
+// как есть, поэтому на экране висели сами теги: «<b>Войны между странами</b>»
+// (Кенан 01.08.2026). Разбираем только жирный — ничего исполняемого в текстах
+// нет, и вставлять сырой HTML в разметку ради этого не нужно.
+const withBold = (text: string): React.ReactNode[] =>
+  String(text).split(/<b>|<\/b>/g).map((part, i) =>
+    i % 2 === 1
+      ? <strong key={i} style={{ color: '#EAE2CC', fontWeight: 700 }}>{part}</strong>
+      : <React.Fragment key={i}>{part}</React.Fragment>,
+  );
+
+export const WarsPage: React.FC = () => {
+  const t = useT();
+  const { user } = useUserStore();
+  const [tab, setTab] = useState<Tab>('countries');
+  const [sort, setSort] = useState<'wins' | 'alpha'>('wins');
+
+  // Data
+  const [countries, setCountries] = useState<any[]>([]);
+  const [activeWars, setActiveWars] = useState<any[]>([]);
+  const [historyWars, setHistoryWars] = useState<any[]>([]);
+  const [myCountry, setMyCountry] = useState<any>(null);
+  const [myMembership, setMyMembership] = useState<any>(null);
+  const [isCommander, setIsCommander] = useState(false);
+  const [myActiveWar, setMyActiveWar] = useState<any>(null);
+
+  // UI State
+  const [loading, setLoading] = useState(true);
+  const [showIntro, setShowIntro] = useState(false);
+  const [showDeclareWar, setShowDeclareWar] = useState(false);
+  const [selectedCountryId, setSelectedCountryId] = useState<string | null>(null);
+  const [selectedWarId, setSelectedWarId] = useState<string | null>(null);
+  const [searchCountry, setSearchCountry] = useState('');
+  const [showDonate, setShowDonate] = useState(false);
+  const [donateAmt, setDonateAmt] = useState('');
+  const [donating, setDonating] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const [pageConfirm, PageConfirmDialog] = useConfirm();
+
+  const loadAll = useCallback(async () => {
+    try {
+      setLoading(true);
+      const [countriesRes, myRes] = await Promise.all([
+        warsApi.countries(sort),
+        warsApi.myCountry(),
+      ]);
+      setCountries(countriesRes.countries);
+      setMyCountry(myRes.country);
+      setMyMembership(myRes.membership);
+      setIsCommander(myRes.isCommander);
+      setMyActiveWar(myRes.activeWar);
+
+      // Check intro
+      if (user && !user.hasSeenWarsIntro) {
+        setShowIntro(true);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [sort, user]);
+
+  const loadActive = useCallback(async () => {
+    const r = await warsApi.active();
+    setActiveWars(r.wars);
+  }, []);
+
+  const loadHistory = useCallback(async () => {
+    const r = await warsApi.history();
+    setHistoryWars(r.wars);
+  }, []);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
+  useEffect(() => { if (tab === 'active') loadActive(); }, [tab, loadActive]);
+  useEffect(() => { if (tab === 'history') loadHistory(); }, [tab, loadHistory]);
+
+  // Auto-refresh: обновляем каждые 30 секунд активную вкладку
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (tab === 'active') loadActive();
+      else if (tab === 'countries') loadAll();
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [tab, loadActive, loadAll]);
+
+  // P0 Кенан 2026-05-19: автоматическое присоединение к очереди матчмейкинга
+  // войны. Если юзер — член воюющей страны и есть активная война в IN_PROGRESS,
+  // шлём `war:queue_join` на сокет (sticky pres, Redis TTL 1ч). Без этого
+  // backend-cron `scheduleWarMatches` не видит свободных бойцов и не создаёт
+  // war_battles → партии войн физически не запускались.
+  //
+  // Audit v1 (T2 review) blockers — учтены здесь:
+  //  · status !== 'IN_PROGRESS'  → не паримся в финишированной/отменённой войне
+  //  · sock.connected guard      → emit на disconnected сокете молча провалится
+  //  · переподключение           → подписка на 'connect' → re-emit join
+  //  · catch пишет console.warn  → пустой catch скрывает диагностику
+  //  · refresh раз в 10 мин      → Redis TTL очереди 3600s, запас 6×
+  useEffect(() => {
+    if (!myActiveWar || !myCountry?.id) return;
+    if (myActiveWar.status !== 'IN_PROGRESS') return;
+    const warId = myActiveWar.id;
+    const countryId = myCountry.id;
+    if (myActiveWar.attackerCountryId !== countryId && myActiveWar.defenderCountryId !== countryId) return;
+
+    let sock: ReturnType<typeof getSocket> | null = null;
+    try { sock = getSocket(); } catch (e) { console.warn('[wars] getSocket failed', e); return; }
+    if (!sock) return;
+
+    const safeEmit = (event: string) => {
+      try {
+        if (!sock || !sock.connected) {
+          // Если ещё не подключён — отложенно дойдёт через onConnect ниже.
+          return;
+        }
+        sock.emit(event, { warId, countryId });
+      } catch (e) {
+        console.warn('[wars] emit', event, 'failed', e);
+      }
+    };
+    const join = () => safeEmit('war:queue_join');
+
+    // Сразу join + re-emit на каждое восстановление соединения.
+    join();
+    const onConnect = () => join();
+    sock.on('connect', onConnect);
+
+    const refresh = setInterval(join, 10 * 60 * 1000); // обновляем TTL раз в 10 мин
+
+    return () => {
+      clearInterval(refresh);
+      try { sock?.off('connect', onConnect); } catch (e) { console.warn('[wars] off connect failed', e); }
+      safeEmit('war:queue_leave');
+    };
+  }, [
+    myActiveWar?.id,
+    myActiveWar?.status,
+    myCountry?.id,
+    myActiveWar?.attackerCountryId,
+    myActiveWar?.defenderCountryId,
+  ]);
+
+  const handleIntroClose = async () => {
+    setShowIntro(false);
+    try { await warsApi.introSeen(); } catch {}
+  };
+
+  const handleDonate = async (amount: number) => {
+    setDonating(true);
+    try {
+      await warsApi.contribute(myCountry.id, amount);
+      toast(t.wars.btnDonate + '!', 'success');
+      setDonateAmt('');
+      setShowDonate(false);
+      loadAll();
+    } catch (e: any) {
+      toast(e.message ?? t.common.error);
+    } finally {
+      setDonating(false);
+    }
+  };
+
+  const handleLeave = async () => {
+    const ok = await pageConfirm({
+      title: t.wars.leaveTeam,
+      message: t.wars.leaveTeamDesc(myCountry?.nameRu ?? ''),
+      okLabel: t.wars.btnLeave,
+      cancelLabel: t.common.cancel,
+      danger: true,
+    });
+    if (!ok) return;
+    setLeaving(true);
+    try {
+      await warsApi.leave();
+      toast(t.wars.leaveCountry, 'success');
+      loadAll();
+    } catch (e: any) {
+      toast(e.message ?? t.common.error);
+    } finally {
+      setLeaving(false);
+    }
+  };
+
+  const filteredCountries = countries.filter(c =>
+    c.nameRu.toLowerCase().includes(searchCountry.toLowerCase()) ||
+    c.nameEn.toLowerCase().includes(searchCountry.toLowerCase())
+  );
+
+  // Найти активную войну для выбранной страны (для кнопки «Вызов» в деталях)
+  const getActiveWarIdForCountry = (countryId: string) => {
+    if (myActiveWar && (myActiveWar.attackerCountryId === countryId || myActiveWar.defenderCountryId === countryId)) {
+      return myActiveWar.id;
+    }
+    return null;
+  };
+
+  const warsInfoBtn = (
+    <button
+      onClick={() => setShowIntro(true)}
+      style={{
+        width: 32, height: 32, borderRadius: '50%', background: 'rgba(61,186,122,0.10)',
+        border: '.5px solid rgba(61,186,122,0.3)', color: '#3DBA7A', fontSize: 14,
+        cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center',
+        justifyContent: 'center', transition: 'all .15s',
+      }}
+    >?</button>
+  );
+
+  return (
+    <PageLayout title={t.wars.title} rightAction={warsInfoBtn}>
+
+      {/* Моя страна — плашка */}
+      {myCountry && (
+        <div style={{
+          margin: '12px 18px', padding: '14px 16px',
+          background: 'linear-gradient(135deg,rgba(61,186,122,0.07),rgba(212,168,67,0.05))',
+          border: '.5px solid rgba(61,186,122,0.28)', borderRadius: 18,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+            <span style={{ fontSize: 28 }}>{myCountry.flag}</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: '.58rem', fontWeight: 700, color: '#3DBA7A', textTransform: 'uppercase', letterSpacing: '.14em', marginBottom: 2 }}>
+                {isCommander ? t.wars.commander : t.wars.fighter}
+              </div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: '#EAE2CC' }}>{myCountry.nameRu}</div>
+            </div>
+          </div>
+
+          {/* Статистика страны */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            <div style={statBoxSmStyle}>
+              <div style={statSmLabelStyle}>{t.wars.treasury}</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#D4A843' }}>{fmtBalance(myCountry.treasury ?? '0')}</div>
+            </div>
+            <div style={statBoxSmStyle}>
+              <div style={statSmLabelStyle}>{t.wars.fightersLabel}</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#EAE2CC' }}>{String(myCountry.memberCount)}</div>
+            </div>
+            <div style={statBoxSmStyle}>
+              <div style={statSmLabelStyle}>{t.wars.wins}</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#3DBA7A' }}>{String(myCountry.wins)}</div>
+            </div>
+          </div>
+
+          {/* Кнопки действий */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <button
+              onClick={() => setShowDonate(true)}
+              style={actionBtnStyle}
+            >
+              {t.wars.btnDonate}
+            </button>
+            <button
+              onClick={() => setSelectedCountryId(myCountry.id)}
+              style={actionBtnStyle}
+            >
+              {t.wars.btnFighters}
+            </button>
+            {/* Audit-fix 2026-06-10: вместо мёртвой disabled-кнопки — тост
+                с объяснением почему недоступно (нет войны и не главком). */}
+            <button
+              onClick={() => {
+                if (myActiveWar) { setSelectedWarId(myActiveWar.id); return; }
+                if (isCommander) { setShowDeclareWar(true); return; }
+                toast('Нет активной войны. Объявить войну может только главком.', 'error');
+              }}
+              style={{ ...actionBtnStyle, color: '#3DBA7A', borderColor: 'rgba(61,186,122,0.3)', opacity: (!isCommander && !myActiveWar) ? 0.4 : 1 }}
+            >
+              {t.wars.btnBattles}
+            </button>
+            <button
+              onClick={handleLeave}
+              style={{ ...actionBtnStyle, color: '#FF4D6A', borderColor: 'rgba(255,77,106,0.3)' }}
+            >
+              {t.wars.btnLeave}
+            </button>
+          </div>
+
+          {myActiveWar && (
+            <div
+              onClick={() => setSelectedWarId(myActiveWar.id)}
+              style={{ marginTop: 10, padding: '10px 14px', background: 'rgba(255,77,106,0.06)', border: '.5px solid rgba(255,77,106,0.22)', borderRadius: 14, cursor: 'pointer', transition: 'all .15s' }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#FF4D6A' }}>{t.wars.warInProgress}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#3DBA7A', animation: 'pulse 2s ease-in-out infinite' }} />
+                  <span style={{ fontSize: 9, color: '#3DBA7A', fontWeight: 600 }}>{t.wars.autoMatchmaking}</span>
+                </div>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontSize: 12, color: '#EAE2CC' }}>
+                  {myActiveWar.attackerCountry?.nameRu} vs {myActiveWar.defenderCountry?.nameRu}
+                </div>
+                <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 14, fontWeight: 800, color: '#D4A843' }}>
+                  {myActiveWar.attackerWins} : {myActiveWar.defenderWins}
+                </div>
+              </div>
+              <div style={{ fontSize: 10, color: '#7A7875', marginTop: 2 }}><WarCountdown initialSeconds={myActiveWar.secondsLeft ?? 0} active={true} /></div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Поиск — всегда над табами */}
+      <div style={{ margin: '8px 18px 8px', position: 'relative' }}>
+        <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: '#7A7875', pointerEvents: 'none' }}>
+          <IcoSearch size={14} />
+        </span>
+        <input
+          placeholder={t.wars.searchPlaceholder}
+          value={searchCountry}
+          onChange={e => setSearchCountry(e.target.value)}
+          style={{ ...inputStyle, width: '100%', marginBottom: 0, boxSizing: 'border-box', paddingLeft: 34 }}
+        />
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display: 'flex', margin: '0 18px 12px', background: 'rgba(255,255,255,0.04)', borderRadius: 12, padding: 3, border: '.5px solid rgba(154,148,144,.15)' }}>
+        {([['countries', t.wars.tabs.countries], ['active', t.wars.tabs.active], ['history', t.wars.tabs.history]] as [Tab, string][]).map(([tabKey, label]) => (
+          <button key={tabKey} onClick={() => setTab(tabKey)} style={{
+            flex: 1, padding: '8px 4px', border: 'none', borderRadius: 9, fontFamily: 'inherit',
+            fontSize: 11, fontWeight: 600, cursor: 'pointer', transition: 'all .15s',
+            background: tab === tabKey ? 'linear-gradient(135deg,#141018,#0F0E18)' : 'transparent',
+            color: tab === tabKey ? '#EAE2CC' : '#7A7875',
+            boxShadow: tab === tabKey ? '0 1px 4px rgba(0,0,0,0.3)' : 'none',
+          }}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── TAB: СТРАНЫ ─────────────────────────────────────────────────────── */}
+      {tab === 'countries' && (
+        <>
+          {loading && <div style={{ textAlign: 'center', color: '#7A7875', padding: 32 }}>{t.common.loading}</div>}
+
+          {filteredCountries.map((c, i) => {
+            const isMyCountry = myCountry?.id === c.id;
+            return (
+              <div
+                key={c.id}
+                onClick={() => setSelectedCountryId(c.id)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 12,
+                  margin: '0 18px 6px', padding: '12px 14px',
+                  background: isMyCountry
+                    ? 'linear-gradient(135deg,rgba(61,186,122,0.07),rgba(212,168,67,0.04))'
+                    : 'linear-gradient(135deg,#141018,#0F0E18)',
+                  border: `.5px solid ${isMyCountry ? 'rgba(61,186,122,0.32)' : 'rgba(154,148,144,.22)'}`,
+                  borderRadius: 16, cursor: 'pointer', transition: 'all .15s',
+                }}
+              >
+                <span style={{ fontSize: 11, fontWeight: 700, color: '#7A7875', width: 20, textAlign: 'center', flexShrink: 0 }}>
+                  {i + 1}
+                </span>
+                <span style={{ fontSize: 26 }}>{c.flag}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: isMyCountry ? '#3DBA7A' : '#EAE2CC', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {c.nameRu}
+                    {isMyCountry && <span style={{ fontSize: 9, marginLeft: 6, color: '#3DBA7A', fontWeight: 600 }}>{t.wars.myCountryTag}</span>}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#7A7875', marginTop: 2 }}>
+                    {t.wars.fightersCount}: {c.memberCount} / {c.maxMembers}
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: '#3DBA7A' }}>{c.wins}W</div>
+                  <div style={{ fontSize: 10, color: '#7A7875' }}>{t.wars.winsCount}</div>
+                </div>
+              </div>
+            );
+          })}
+
+          {!loading && filteredCountries.length === 0 && (
+            <div style={{ textAlign: 'center', color: '#7A7875', padding: 32, fontSize: 13 }}>{t.wars.nothingFound}</div>
+          )}
+        </>
+      )}
+
+      {/* ── TAB: ИДЁТ ВОЙНА ──────────────────────────────────────────────────── */}
+      {tab === 'active' && (
+        <>
+          {activeWars.length === 0 && (
+            <div style={{ textAlign: 'center', padding: 40 }}>
+              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12, color: '#3DBA7A' }}><IcoHandshake size={40} /></div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#EAE2CC', marginBottom: 6 }}>{t.wars.noWars}</div>
+              <div style={{ fontSize: 12, color: '#7A7875' }}>
+                {isCommander ? t.wars.isCommander : t.wars.notCommander}
+              </div>
+            </div>
+          )}
+          {activeWars.map(war => (
+            <div key={war.id} style={{
+              margin: '0 18px 10px',
+              background: 'linear-gradient(135deg,#141018,#0F0E18)',
+              border: '.5px solid rgba(61,186,122,0.28)',
+              borderRadius: 20, overflow: 'hidden',
+            }}>
+              <div style={{ padding: '14px 16px', background: 'linear-gradient(135deg,rgba(61,186,122,0.06),transparent)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ textAlign: 'center', flex: 1 }}>
+                    <div style={{ fontSize: 28 }}>{war.attackerCountry?.flag}</div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#EAE2CC', marginTop: 4 }}>{war.attackerCountry?.nameRu}</div>
+                  </div>
+                  <div style={{ textAlign: 'center', padding: '0 8px' }}>
+                    <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 24, fontWeight: 800, color: '#D4A843' }}>
+                      {war.attackerWins} : {war.defenderWins}
+                    </div>
+                    <div style={{ fontSize: 10, color: '#3DBA7A', marginTop: 2 }}><WarCountdown initialSeconds={war.secondsLeft ?? 0} active={war.status === 'IN_PROGRESS'} /></div>
+                  </div>
+                  <div style={{ textAlign: 'center', flex: 1 }}>
+                    <div style={{ fontSize: 28 }}>{war.defenderCountry?.flag}</div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#EAE2CC', marginTop: 4 }}>{war.defenderCountry?.nameRu}</div>
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, padding: '10px 14px 14px' }}>
+                <button
+                  onClick={() => setSelectedWarId(war.id)}
+                  style={{
+                    flex: 1, padding: '9px',
+                    background: 'rgba(255,255,255,0.04)', color: '#EAE2CC',
+                    border: '.5px solid rgba(154,148,144,.22)', borderRadius: 12,
+                    fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', transition: 'all .15s',
+                  }}
+                >
+                  {t.wars.watch}
+                </button>
+                {myActiveWar?.id === war.id && (
+                  <button
+                    onClick={() => setTab('countries')}
+                    style={{
+                      flex: 1, padding: '9px',
+                      background: 'linear-gradient(135deg,#0A1F14,#0D2B1A)', color: '#3DBA7A',
+                      border: '.5px solid rgba(61,186,122,.38)', borderRadius: 12,
+                      fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', transition: 'all .15s',
+                    }}
+                  >
+                    {t.wars.participate}
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+
+      {/* ── TAB: ИСТОРИЯ ─────────────────────────────────────────────────────── */}
+      {tab === 'history' && (
+        <>
+          {historyWars.length === 0 && (
+            <div style={{ textAlign: 'center', padding: 40 }}>
+              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12, color: '#7A7875' }}><IcoStats size={40} /></div>
+              <div style={{ fontSize: 13, color: '#7A7875' }}>{t.wars.historyEmpty}</div>
+            </div>
+          )}
+          {historyWars.map(war => {
+            const attackerWon = war.winnerCountryId === war.attackerCountryId;
+            const defenderWon = war.winnerCountryId === war.defenderCountryId;
+            return (
+              <div key={war.id} style={{
+                margin: '0 18px 10px',
+                background: 'linear-gradient(135deg,#141018,#0F0E18)',
+                border: '.5px solid rgba(154,148,144,.22)',
+                borderRadius: 20, overflow: 'hidden',
+              }}>
+                <div style={{ padding: '14px 16px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }} onClick={() => setSelectedCountryId(war.attackerCountryId)}>
+                      <span style={{ fontSize: 24 }}>{war.attackerCountry?.flag}</span>
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: attackerWon ? '#D4A843' : '#EAE2CC' }}>
+                          {attackerWon && <span style={{ display: 'inline-flex', verticalAlign: 'middle', marginRight: 4 }}><IcoTrophy size={12} /></span>}{war.attackerCountry?.nameRu}
+                        </div>
+                        <div style={{ fontSize: 10, color: '#7A7875' }}>{war.attackerWins} {t.wars.winsCount}</div>
+                      </div>
+                    </div>
+                    <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 20, fontWeight: 800, color: '#7A7875' }}>
+                      {war.attackerWins}:{war.defenderWins}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }} onClick={() => setSelectedCountryId(war.defenderCountryId)}>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: defenderWon ? '#D4A843' : '#EAE2CC' }}>
+                          {defenderWon && <span style={{ display: 'inline-flex', verticalAlign: 'middle', marginRight: 4 }}><IcoTrophy size={12} /></span>}{war.defenderCountry?.nameRu}
+                        </div>
+                        <div style={{ fontSize: 10, color: '#7A7875' }}>{war.defenderWins} {t.wars.winsCount}</div>
+                      </div>
+                      <span style={{ fontSize: 24 }}>{war.defenderCountry?.flag}</span>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 10, color: '#7A7875' }}>
+                    {war.battleCount} {t.wars.gamesPlayed} • {war.finishedAt ? new Date(war.finishedAt).toLocaleDateString() : ''}
+                  </div>
+                </div>
+                <div style={{ padding: '0 14px 12px' }}>
+                  <button
+                    onClick={() => setSelectedWarId(war.id)}
+                    style={{
+                      width: '100%', padding: '9px',
+                      background: 'rgba(255,255,255,0.04)', color: '#EAE2CC',
+                      border: '.5px solid rgba(154,148,144,.22)', borderRadius: 12,
+                      fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', transition: 'all .15s',
+                    }}
+                  >
+                    {t.wars.details}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {/* Модал доната в казну — центральный DonateModal */}
+      {showDonate && myCountry && (
+        <DonateModal
+          onClose={() => setShowDonate(false)}
+          onSubmit={handleDonate}
+          currentPool={myCountry.treasury}
+        />
+      )}
+
+      {/* Подтверждение выхода — центральный модал через useConfirm */}
+      {PageConfirmDialog}
+
+      {/* Modals */}
+      {showIntro && <WarsIntroModal onClose={handleIntroClose} />}
+      {showDeclareWar && myCountry && (
+        <DeclareWarModal myCountryId={myCountry.id} onClose={() => setShowDeclareWar(false)} onDeclared={loadAll} />
+      )}
+      {selectedCountryId && (
+        <CountryDetailModal
+          countryId={selectedCountryId}
+          activeWarId={getActiveWarIdForCountry(selectedCountryId)}
+          onClose={() => setSelectedCountryId(null)}
+          onJoined={loadAll}
+        />
+      )}
+      {selectedWarId && (
+        <WarDetailModal warId={selectedWarId} onClose={() => setSelectedWarId(null)} />
+      )}
+    </PageLayout>
+  );
+};
+
+// ─── Utils ───────────────────────────────────────────────────────────────────
+function formatTime(seconds: number): string {
+  if (!seconds) return '0:00';
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+// ─── Styles ──────────────────────────────────────────────────────────────────
+const overlayStyle: React.CSSProperties = {
+  position: 'fixed', inset: 0, background: 'rgba(0,0,0,.82)', backdropFilter: 'blur(18px)',
+  zIndex: 300, display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+  // 2026-05-16 Кенан: модал не должен прятаться за BottomNav (≈72px)
+  // и не лип к Telegram статус-бару сверху.
+  paddingBottom: 'calc(72px + env(safe-area-inset-bottom, 0px) + 8px)',
+  paddingTop: 'calc(env(safe-area-inset-top, 0px) + 14px)',
+};
+
+const bottomSheetStyle: React.CSSProperties = {
+  width: '100%',
+  background: 'linear-gradient(160deg,#12151E,#0E111A)',
+  borderRadius: '24px 24px 0 0',
+  padding: '14px 18px 18px',
+  border: '1px solid rgba(255,255,255,.09)',
+  borderBottom: 'none',
+  // 2026-05-16: минимум 40vh, чтобы пустые блоки (таблица лидеров без
+  // данных, страна без бойцов) выглядели как полная панель, а не как
+  // тонкая полоска внизу.
+  minHeight: '40vh',
+  maxHeight: 'calc(100vh - 90px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px))',
+  overflowY: 'auto',
+  display: 'flex',
+  flexDirection: 'column',
+};
+
+const modalCardStyle: React.CSSProperties = {
+  background: 'linear-gradient(160deg,#12151E,#0E111A)',
+  borderRadius: 24,
+  padding: 24,
+  border: '1px solid rgba(255,255,255,.09)',
+  maxHeight: '85vh',
+  overflowY: 'auto',
+  margin: 'auto',
+};
+
+const handleBar: React.CSSProperties = {
+  width: 36, height: 4, background: 'rgba(154,148,144,.3)', borderRadius: 2, margin: '0 auto 18px',
+};
+
+const closeBtnStyle: React.CSSProperties = {
+  width: 32, height: 32, borderRadius: '50%', background: 'rgba(255,255,255,0.05)',
+  border: '.5px solid rgba(154,148,144,.22)', color: '#7A7875', fontSize: 14,
+  cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center',
+  justifyContent: 'center', transition: 'all .15s',
+};
+
+const greenBtnFull: React.CSSProperties = {
+  width: '100%', padding: 13,
+  background: 'linear-gradient(135deg,#0A1F14,#0D2B1A)',
+  color: '#3DBA7A',
+  border: '.5px solid rgba(61,186,122,.38)',
+  borderRadius: 12, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
+  transition: 'all .15s',
+};
+
+const inputStyle: React.CSSProperties = {
+  width: '100%', padding: '10px 14px',
+  background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)',
+  borderRadius: 10, color: '#EAE2CC', fontSize: 13, fontFamily: 'inherit', outline: 'none',
+  boxSizing: 'border-box', marginBottom: 10,
+};
+
+const sectionLabelStyle: React.CSSProperties = {
+  fontSize: '.58rem', fontWeight: 700, color: '#7A7875',
+  textTransform: 'uppercase', letterSpacing: '.14em', marginBottom: 8,
+};
+
+const statBoxStyle: React.CSSProperties = {
+  flex: 1, padding: '10px 8px', textAlign: 'center',
+  background: 'linear-gradient(135deg,#141018,#0F0E18)',
+  border: '.5px solid rgba(154,148,144,.22)', borderRadius: 12,
+};
+
+const statLabelStyle: React.CSSProperties = {
+  fontSize: '.55rem', fontWeight: 700, color: '#7A7875',
+  textTransform: 'uppercase', letterSpacing: '.12em', marginBottom: 4,
+};
+
+const statValueStyle: React.CSSProperties = {
+  fontSize: 15, fontWeight: 800, color: '#EAE2CC',
+};
+
+const statBoxSmStyle: React.CSSProperties = {
+  flex: 1, padding: '8px 6px', textAlign: 'center',
+  background: 'rgba(255,255,255,0.03)',
+  border: '.5px solid rgba(154,148,144,.15)', borderRadius: 10,
+};
+
+const statSmLabelStyle: React.CSSProperties = {
+  fontSize: '.5rem', fontWeight: 700, color: '#7A7875',
+  textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 3,
+};
+
+const actionBtnStyle: React.CSSProperties = {
+  padding: '9px 8px',
+  background: 'rgba(255,255,255,0.04)',
+  color: '#EAE2CC',
+  border: '.5px solid rgba(154,148,144,.22)',
+  borderRadius: 10, fontSize: 12, fontWeight: 600,
+  cursor: 'pointer', fontFamily: 'inherit', transition: 'all .15s',
+};
+
+const chipBtn = (active: boolean): React.CSSProperties => ({
+  padding: '7px 12px', borderRadius: 10, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+  border: '.5px solid', fontFamily: 'inherit', transition: 'all .15s',
+  background: active ? 'rgba(61,186,122,0.12)' : 'rgba(255,255,255,0.04)',
+  color: active ? '#3DBA7A' : '#7A7875',
+  borderColor: active ? 'rgba(61,186,122,0.38)' : 'rgba(154,148,144,.18)',
+  whiteSpace: 'nowrap' as const,
+});

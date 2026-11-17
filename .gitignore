@@ -1,0 +1,102 @@
+# ─── Секреты и конфиги (НИКОГДА не коммитить) ────────────────
+pgbouncer-userlist.txt
+# Локальные настройки Claude Code / Cursor (могут содержать IP, SSH, токены)
+.claude/
+
+.env
+.env.local
+.env.production
+.env.production.local
+backend/.env
+frontend/.env.production
+
+# ─── Node.js ──────────────────────────────────────────────────
+node_modules/
+dist/
+build/
+.next/
+
+# ─── Python ───────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# ─── TypeScript ───────────────────────────────────────────────
+*.tsbuildinfo
+
+# ─── Prisma ───────────────────────────────────────────────────
+# НЕ игнорируем migrations — они должны быть в репозитории
+prisma/.env
+
+# ─── Логи ────────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+
+# ─── OS ──────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── IDE ─────────────────────────────────────────────────────
+.idea/
+.vscode/settings.json
+*.swp
+
+# ─── Docker ──────────────────────────────────────────────────
+# docker-compose.override.yml может содержать локальные секреты
+docker-compose.override.yml
+
+# ─── Coverage ────────────────────────────────────────────────
+coverage/
+.nyc_output/
+.aider*
+*.mojibake-bak
+
+# ─── Runtime data ────────────────────────────────────────────
+bot_inbox/
+
+# Local Codex/Kenan workspace files (never commit)
+/AGENTS.md
+/PROJECTS.json
+/HISTORY.json
+/projects/
+/vault.enc
+/vault_decrypt.bat
+/chesscoin-archive/
+/chesscoin-backups/
+/*.bak_before_*
+/build_994_docx.js
+/чат/
+
+# Legacy local design/docs snapshots
+/ROADMAP.md
+/frontend/CHESS_TIMER_DESIGN_SPEC.txt
+
+# Secrets (encrypted is OK, plaintext NEVER)
+.secrets.json
+.secrets.txt
+.secrets.*.json
+# Encrypted .secrets.enc можно commit'ить если passphrase отдельно у Кенана на телефоне
+# Но безопаснее не commit'ить ни в каком виде:
+.secrets.enc
+
+# управляющий контур: кеш python
+project_management/tools/__pycache__/
+
+# Граф знаний проекта: пересобирается командой, в git не хранится (6 МБ).
+# Как обновить — project_management/rules/10_KNOWLEDGE_GRAPH.md
+graphify-out/
+
+# Локальные доступы проекта — НЕ деплоить и НЕ коммитить
+_secrets/
+
+# ─── Дополнено 18.11.2026 перед публикацией ───
+.env*
+!.env.example
+!backend/.env.example
+*.pem
+*.key
+*.dump
+*.bak*

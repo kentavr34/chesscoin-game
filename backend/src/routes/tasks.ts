@@ -1,0 +1,400 @@
+import { Router, Request, Response } from "express";
+import { z } from "zod";
+import { logger, logError } from "@/lib/logger";
+import { prisma } from "../lib/prisma";
+import { authMiddleware } from "../middleware/auth";
+import { validate } from "@/middleware/validate";
+import { updateBalance } from "@/services/economy";
+import { payFromTreasury } from "@/services/treasury";
+import { TransactionType } from "@prisma/client";
+
+const CompleteTaskSchema = z.object({ taskId: z.string() });
+
+export const tasksRouter = Router();
+
+// ─── GET /api/v1/tasks ────────────────────────────────────────────────────────
+tasksRouter.get("/", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+
+    const [tasks, completed] = await Promise.all([
+      prisma.task.findMany({
+        where: { status: "ACTIVE" },
+        orderBy: { createdAt: "asc" },
+      }),
+      prisma.completedTask.findMany({
+        where: { userId },
+        select: { taskId: true, completedAt: true },
+      }),
+    ]);
+
+    const completedSet = new Map(
+      completed.map((c) => [c.taskId, c.completedAt])
+    );
+
+    // G16: Авто-начисление реферальных заданий
+    for (const task of tasks) {
+      if (completedSet.has(task.id)) continue;
+      if (task.taskType === 'REFERRAL') {
+        const meta = task.metadata as Record<string, unknown>;
+        const required = Number(meta?.referralCount ?? 1);
+        const actual = await prisma.user.count({ where: { referrerId: userId, referralActivated: true } });
+        if (actual >= required) {
+          try {
+            await prisma.completedTask.create({ data: { userId, taskId: task.id } });
+            await payFromTreasury(userId, task.winningAmount, TransactionType.TASK_REWARD, { taskId: task.id, auto: true });
+            completedSet.set(task.id, new Date());
+            logger.info(`[tasks] Auto-completed REFERRAL task ${task.id} for user ${userId}`);
+          } catch {}
+        }
+      }
+    }
+
+    const getCategory = (task: any): string => {
+      const meta = task.metadata as any;
+      if (meta?.category) return meta.category;
+      switch (task.taskType) {
+        case 'SUBSCRIBE_TELEGRAM':
+        case 'FOLLOW_LINK':
+        case 'REFERRAL':
+          return 'SOCIAL';
+        case 'DAILY_LOGIN':
+        case 'WIN_N':
+        case 'WIN_STREAK_N':
+        case 'PLAY_N':
+        case 'FIRST_GAME':
+          return 'DAILY';
+        case 'WIN_BOT_N':
+        case 'ENTER_CODE':
+        case 'PUZZLE':
+          return 'LEARN';
+        default:
+          return 'OTHER';
+      }
+    };
+
+    const result = tasks.map((task) => {
+      const isCompleted = completedSet.has(task.id);
+      return {
+        id: task.id,
+        type: getCategory(task),
+        taskType: task.taskType,
+        icon: task.icon,
+        title: task.title,
+        description: task.description,
+        metadata: task.metadata,
+        status: task.status,
+        reward: task.winningAmount.toString(),
+        winningAmount: task.winningAmount.toString(),
+        isCompleted,
+        completed: isCompleted,
+        completedAt: completedSet.get(task.id) ?? null,
+      };
+    });
+
+    res.json({ tasks: result });
+  } catch (err) {
+    logger.error("[tasks/list]", err);
+    res.status(500).json({ error: "Failed to load tasks" });
+  }
+});
+
+// ─── POST /api/v1/tasks/complete ─────────────────────────────────────────────
+tasksRouter.post("/complete", authMiddleware, validate(CompleteTaskSchema), async (req: Request, res: Response) => { // R4
+  try {
+    const { taskId } = req.body;
+    if (!taskId) return res.status(400).json({ error: "taskId обязателен" });
+
+    const userId = req.user!.id;
+
+    const task = await prisma.task.findUnique({ where: { id: taskId } });
+    if (!task || task.status !== "ACTIVE")
+      return res.status(404).json({ error: "Task not found" });
+
+    // Проверяем что не выполнено
+    const existing = await prisma.completedTask.findUnique({
+      where: { userId_taskId: { userId, taskId } },
+    });
+    if (existing) return res.status(409).json({ error: "Task already completed" });
+
+    // Подписку на канал проверяем по факту у Telegram, а не на слово клиента:
+    // раньше любой запрос к этому эндпоинту выдавал награду без подписки
+    // (Кенан 31.07.2026 — «проверь все задания»).
+    if (task.taskType === "SUBSCRIBE_TELEGRAM") {
+      const channel = process.env.TELEGRAM_CHANNEL_ID ?? "";
+      const botToken = process.env.BOT_TOKEN ?? "";
+      const me = await prisma.user.findUnique({ where: { id: userId }, select: { telegramId: true } });
+      if (!channel || !botToken || !me?.telegramId) {
+        return res.status(503).json({ error: "SUBSCRIPTION_CHECK_UNAVAILABLE", message: "Проверка подписки временно недоступна" });
+      }
+      try {
+        const r = await fetch(
+          `https://api.telegram.org/bot${botToken}/getChatMember?chat_id=${encodeURIComponent(channel)}&user_id=${encodeURIComponent(me.telegramId)}`,
+          { signal: AbortSignal.timeout(10_000) },
+        );
+        const data = await r.json() as { ok?: boolean; result?: { status?: string } };
+        const status = data?.result?.status ?? "";
+        const subscribed = ["creator", "administrator", "member"].includes(status);
+        if (!data?.ok || !subscribed) {
+          return res.status(400).json({ error: "NOT_SUBSCRIBED", message: "Подпишись на канал и вернись за наградой" });
+        }
+      } catch (e) {
+        logError("[tasks] проверка подписки", e);
+        return res.status(503).json({ error: "SUBSCRIPTION_CHECK_FAILED", message: "Не удалось проверить подписку, попробуй ещё раз" });
+      }
+    }
+
+    // Для FOLLOW_LINK — проверить нечем: ни Twitter, ни YouTube не дают
+    // подтвердить подписку. Такие задания живут на доверии, поэтому держать
+    // их активными имеет смысл только с настоящими ссылками.
+    // Для REFERRAL — проверяем количество рефералов
+    if (task.taskType === "REFERRAL") {
+      const meta = task.metadata as Record<string, unknown>;
+      const requiredCount = Number(meta?.referralCount ?? 1);
+      const actualCount = await prisma.user.count({
+        where: { referrerId: userId, referralActivated: true },
+      });
+      if (actualCount < requiredCount) {
+        return res.status(400).json({
+          error: `Нужно ${requiredCount} рефералов, у вас ${actualCount}`,
+        });
+      }
+    }
+
+    // Если код — проверяем
+    if (task.taskType === "ENTER_CODE") {
+      const meta = task.metadata as Record<string, unknown>;
+      const { code } = req.body;
+      if (!code || code !== meta?.code)
+        return res.status(400).json({ error: "Invalid code" });
+    }
+
+    // Начислить награду через updateBalance (создаёт транзакцию автоматически)
+    await prisma.completedTask.create({ data: { userId, taskId } });
+    await payFromTreasury(userId, BigInt(task.winningAmount.toString()), TransactionType.TASK_REWARD, { taskId, taskTitle: task.title });
+
+    res.json({
+      success: true,
+      reward: task.winningAmount.toString(),
+      message: `+${task.winningAmount} ᚙ за задание «${task.title}»`,
+    });
+  } catch (err: unknown) {
+    logger.error("[tasks/complete]", err);
+    res.status(500).json({ error: "Failed to complete task" });
+  }
+});
+
+// ─── GET /api/v1/tasks/puzzles?difficulty=easy|medium|hard ───────────────────
+// Возвращает случайную задачу нужной сложности (которую пользователь ещё не решал)
+tasksRouter.get("/puzzles", authMiddleware, async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const difficulty = (req.query.difficulty as string) ?? "medium";
+
+  const ratingRange: Record<string, { gte?: number; lte?: number }> = {
+    easy:   { lte: 1199 },
+    medium: { gte: 1200, lte: 1600 },
+    hard:   { gte: 1601 },
+  };
+  const ratingFilter = ratingRange[difficulty] ?? ratingRange.medium;
+
+  try {
+    // ID уже решённых задач этим пользователем
+    const solved = await prisma.completedPuzzle.findMany({
+      where: { userId },
+      select: { puzzleId: true },
+    });
+    const solvedIds = solved.map((s: Record<string,unknown>) => s.puzzleId) as string[];
+
+    // Считаем сколько подходящих задач
+    const count = await prisma.puzzle.count({
+      where: { rating: ratingFilter, id: { notIn: solvedIds } },
+    });
+
+    if (count === 0) {
+      return res.status(404).json({ error: "No puzzles available — you solved them all!" });
+    }
+
+    // Случайная задача (OFFSET RANDOM — для небольших наборов ок)
+    const skip = Math.floor(Math.random() * count);
+    const [puzzle] = await prisma.puzzle.findMany({
+      where: { rating: ratingFilter, id: { notIn: solvedIds } },
+      skip,
+      take: 1,
+    });
+
+    res.json({ puzzle: { ...puzzle, reward: puzzle.reward.toString() } });
+  } catch (e: unknown) {
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ─── GET /api/v1/tasks/puzzles/daily ─────────────────────────────────────────
+// Задача дня — одна на всех, обновляется через cron
+tasksRouter.get("/puzzles/daily", authMiddleware, async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  try {
+    const puzzle = await prisma.puzzle.findFirst({
+      where: { isDaily: true },
+      orderBy: { dailyDate: "desc" },
+    });
+    if (!puzzle) return res.status(404).json({ error: "Daily puzzle not assigned" });
+
+    const alreadySolved = await prisma.completedPuzzle.findUnique({
+      where: { userId_puzzleId: { userId, puzzleId: puzzle.id } },
+    });
+
+    res.json({
+      puzzle: { ...puzzle, reward: puzzle.reward.toString() },
+      alreadySolved: !!alreadySolved,
+    });
+  } catch (e: unknown) {
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});
+
+// ─── Sprint 5 (Floor 2: Learning) — последовательные уроки ─────────────────
+// Награда — за трудность блока, а не за номер урока (Кенан 01.08.2026,
+// уточнено 05.08.2026: «начинать с лёгкого и идти к сложному… сложные маты —
+// 15, даже 20 тысяч»). Сумма лежит в самой строке урока и растёт по лестнице:
+// азбука 1 тыс. → первые маты 2 тыс. → приёмы 3 тыс. → эндшпиль 5 тыс. →
+// комбинации, атака и маты в 2–3 хода от 7 до 20 тыс. Весь путь из 300 уроков
+// стоит казне около 2,5 млн на игрока.
+//
+// Формулы «1000 + 1000 × номер» больше НЕТ. Она печатала деньги: после
+// последнего урока счётчик уровня продолжал расти, и уровень 301 заплатил бы
+// 302 000, а 302 — уже 303 000, без предела. Урока нет в линейке — награды нет.
+const lessonReward = async (level: number): Promise<bigint | null> => {
+  const lesson = await prisma.lesson.findUnique({
+    where: { id: level }, select: { reward: true },
+  }).catch(() => null);
+  return lesson?.reward ?? null;
+};
+
+// GET /api/v1/tasks/lessons/progress
+tasksRouter.get("/lessons/progress", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const rows = await prisma.$queryRaw<Array<{ userId: string; currentLevel: number; completedAt: Date[] }>>`
+      SELECT "userId", "currentLevel", "completedAt"
+      FROM lesson_progress
+      WHERE "userId" = ${userId}
+      LIMIT 1
+    `;
+    const row = rows[0];
+    const currentLevel = row?.currentLevel ?? 1;
+    const completedLevels = (row?.completedAt ?? []).map((_, i) => i + 1);
+    res.json({
+      currentLevel,
+      completedLevels,
+      completedAt: row?.completedAt ?? [],
+      // Линейка кончилась — следующей награды нет, а не «ноль монет».
+      nextReward: (await lessonReward(currentLevel))?.toString() ?? null,
+    });
+  } catch (err) {
+    logger.error("[tasks/lessons/progress]", err);
+    res.status(500).json({ error: "Failed to load lesson progress" });
+  }
+});
+
+// POST /api/v1/tasks/lessons/:level/complete
+tasksRouter.post("/lessons/:level/complete", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const level = Number(req.params.level);
+    if (!Number.isFinite(level) || level < 1) {
+      return res.status(400).json({ error: "Invalid level" });
+    }
+
+    const rows = await prisma.$queryRaw<Array<{ currentLevel: number; completedAt: Date[] }>>`
+      SELECT "currentLevel", "completedAt" FROM lesson_progress WHERE "userId" = ${userId} LIMIT 1
+    `;
+    const current = rows[0]?.currentLevel ?? 1;
+    if (level !== current) {
+      return res.status(400).json({ error: `Текущий уровень: ${current}, нельзя завершить ${level}` });
+    }
+
+    // Границу линейки задаёт сама таблица уроков. Урока нет — засчитывать
+    // нечего: иначе после последнего урока уровень рос бы дальше и платил
+    // за пустоту.
+    const reward = await lessonReward(level);
+    if (reward === null) {
+      return res.status(400).json({ error: "LESSON_NOT_FOUND" });
+    }
+    const now = new Date();
+
+    // upsert progress
+    await prisma.$executeRaw`
+      INSERT INTO lesson_progress ("userId", "currentLevel", "completedAt", "updatedAt")
+      VALUES (${userId}, ${level + 1}, ARRAY[${now}::timestamp(3)], ${now})
+      ON CONFLICT ("userId") DO UPDATE
+      SET "currentLevel" = ${level + 1},
+          "completedAt" = lesson_progress."completedAt" || ARRAY[${now}::timestamp(3)],
+          "updatedAt"   = ${now}
+    `;
+
+    await payFromTreasury(userId, reward, TransactionType.TASK_REWARD, { lessonLevel: level });
+
+    res.json({
+      success: true,
+      level,
+      nextLevel: level + 1,
+      reward: reward.toString(),
+      message: `+${reward} ᚙ за урок ${level}`,
+    });
+  } catch (err) {
+    logger.error("[tasks/lessons/complete]", err);
+    res.status(500).json({ error: "Failed to complete lesson" });
+  }
+});
+
+// ─── POST /api/v1/tasks/puzzles/:id/complete ─────────────────────────────────
+// Проверка решения и начисление награды
+tasksRouter.post("/puzzles/:id/complete", authMiddleware, async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const puzzleId = req.params.id;
+  const { moves }: { moves: string[] } = req.body;
+
+  try {
+    const puzzle = await prisma.puzzle.findUnique({ where: { id: puzzleId } });
+    if (!puzzle) return res.status(404).json({ error: "Puzzle not found" });
+
+    // Проверяем не решена ли уже
+    const existing = await prisma.completedPuzzle.findUnique({
+      where: { userId_puzzleId: { userId, puzzleId } },
+    });
+    if (existing) {
+      return res.status(400).json({ error: "Puzzle already solved", alreadySolved: true });
+    }
+
+    // Верификация: нормализуем ходы к нижнему регистру без пробелов
+    const normalize = (arr: string[]) => arr.map(m => m.trim().toLowerCase());
+    const correct = normalize(puzzle.moves);
+    const submitted = normalize(moves ?? []);
+
+    // Сравниваем: все ходы должны совпадать
+    const isCorrect =
+      submitted.length === correct.length &&
+      correct.every((m, i) => submitted[i] === m);
+
+    if (!isCorrect) {
+      return res.status(422).json({
+        error: "Wrong solution",
+        correct: false,
+        hint: correct[submitted.length] ?? null, // следующий правильный ход (подсказка)
+      });
+    }
+
+    await prisma.completedPuzzle.create({ data: { userId, puzzleId, reward: puzzle.reward } });
+    await payFromTreasury(userId, puzzle.reward, TransactionType.TASK_REWARD, { puzzleId, rating: puzzle.rating });
+
+    res.json({
+      success: true,
+      correct: true,
+      reward: puzzle.reward.toString(),
+      message: `+${puzzle.reward} ᚙ за задачу!`,
+    });
+  } catch (e: unknown) {
+    logger.error("[puzzles/complete]", e);
+    res.status(500).json({ error: (e instanceof Error ? e.message : String(e)) });
+  }
+});

@@ -1,0 +1,288 @@
+services:
+  # ─── PostgreSQL ───────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: chesscoin_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: chesscoin
+      POSTGRES_USER: chesscoin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # md5 при инициализации — pgbouncer auth_type=md5 не совместим со scram-sha-256
+      POSTGRES_INITDB_ARGS: "--auth-host=md5 --auth-local=trust"
+    # password_encryption=md5 + патч pg_hba.conf при каждом старте — pgbouncer auth_type=md5
+    # не совместим со scram-sha-256; sed патчит существующие тома, INITDB_ARGS — новые
+    command: >
+      sh -c "
+      sed -i 's/scram-sha-256/md5/g' /var/lib/postgresql/data/pg_hba.conf 2>/dev/null || true;
+      exec docker-entrypoint.sh postgres -c password_encryption=md5
+      "
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M # Лимит для предотвращения чрезмерной нагрузки 76%
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "chesscoin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── PgBouncer (T17: connection pooling) ──
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.1-p0
+    container_name: chesscoin_pgbouncer
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://chesscoin:${POSTGRES_PASSWORD}@postgres:5432/chesscoin
+      DB_USER: chesscoin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 200
+      DEFAULT_POOL_SIZE: 20
+      MIN_POOL_SIZE: 5
+      RESERVE_POOL_SIZE: 5
+      AUTH_TYPE: md5
+    # Файл userlist.txt НЕ монтируется — edoburu/pgbouncer генерирует его сам
+    # из DB_USER + DB_PASSWORD при старте. Монтирование файла вызывало
+    # создание директории вместо файла после git pull → exit 127 → restarting loop.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "5432"
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "chesscoin", "-h", "localhost", "-p", "5432"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis ───────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: chesscoin_redis
+    restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env} --maxmemory 512mb --maxmemory-policy allkeys-lru --notify-keyspace-events Kx --save "" --appendonly no
+    volumes:
+      - redis_data:/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Stockfish Native Microservice ──────────
+  # Нативный бинарник: depth 10 за ~200-500ms (WASM было 8-15 секунд!)
+  # Архитектура идентична v1.0.2 — отдельный контейнер с Express HTTP API
+  stockfish:
+    build:
+      context: ./stockfish
+      dockerfile: Dockerfile
+    container_name: chesscoin_stockfish
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    expose:
+      - "3020"
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3020/health',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── Backend ──────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: chesscoin_backend
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"    # M2: ротация логов — максимум 50MB на файл
+        max-file: "5"      # хранить 5 файлов = до 250MB
+    depends_on:
+      # Backend должен стартовать ТОЛЬКО когда pgbouncer healthy —
+      # иначе на холодном reboot backend зацикливается в Restarting,
+      # пока pgbouncer разбирается с userlist.txt. Фикс 2026-04-22.
+      pgbouncer:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      stockfish:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      RUN_CRONS: "true"
+      SERVER_PORT: 3000
+      DATABASE_URL: postgresql://chesscoin:${POSTGRES_PASSWORD}@pgbouncer:5432/chesscoin?connection_limit=10&pool_timeout=10
+      # Прямое подключение к postgres минуя pgbouncer — для prisma migrate
+      # (advisory locks не работают через transaction-pool).
+      DIRECT_URL: postgresql://chesscoin:${POSTGRES_PASSWORD}@postgres:5432/chesscoin
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      BOT_TOKEN: ${BOT_TOKEN}
+      BOT_API_SECRET: ${BOT_API_SECRET}
+      # Канал для постов о топ-батлах. Без него sendToChannel молчал,
+      # а cron рапортовал «completed» — постов не было ни одного (30.07).
+      TELEGRAM_CHANNEL_ID: ${TELEGRAM_CHANNEL_ID}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      FRONTEND_URL: https://${DOMAIN}
+      ADMIN_IDS: ${ADMIN_IDS}
+      PROXY_URL: ${PROXY_URL:-}
+      # Stockfish native microservice (заменяет WASM Worker Thread)
+      STOCKFISH_URL: http://stockfish:3020
+      MAX_ATTEMPTS: 3
+      ATTEMPT_PRICE: 1000
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_REGION: ${S3_REGION:-ru-1}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+      SCREENSHOT_SECRET: ${SCREENSHOT_SECRET}
+      PLATFORM_TON_WALLET: ${PLATFORM_TON_WALLET}
+      TONCENTER_API_KEY: ${TONCENTER_API_KEY}
+      # Ключ тестовой сети лежит про запас для будущего тестового контура,
+      # кодом не используется — боевая сеть определяется TON_NETWORK.
+      TONCENTER_API_KEY_TESTNET: ${TONCENTER_API_KEY_TESTNET:-}
+      TON_NETWORK: ${TON_NETWORK:-mainnet}
+      DOMAIN: ${DOMAIN}
+      # OPT-10: Worker pool size (уменьшено до 2 для экономии ресурса на 2GB VPS)
+      STOCKFISH_POOL_SIZE: ${STOCKFISH_POOL_SIZE:-2}
+      # OPT-10: Node.js heap limit (предотвращает OOM) — уменьшено для 2GB VPS
+      NODE_OPTIONS: "--max-old-space-size=384"
+    # OPT-10: Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.8'
+          memory: 512M
+        reservations:
+          cpus: '0.2'
+          memory: 256M
+    expose:
+      - "3000"
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/health',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── Frontend ────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: chesscoin_frontend
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3" 
+    environment:
+      # Домен для манифеста TonConnect — подставляется при старте контейнера.
+      # Смена домена = правка DOMAIN в .env, без пересборки фронтенда.
+      APP_URL: https://${DOMAIN}
+    expose:
+      - "80"
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # ─── Telegram Bot ────────────────────────
+  bot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    container_name: chesscoin_bot
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3" 
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
+      BOT_API_SECRET: ${BOT_API_SECRET}
+      BACKEND_URL: http://backend:3000/api/v1
+      WEBAPP_URL: https://${DOMAIN}
+      BOT_USERNAME: chessgamecoin_bot
+      ADMIN_IDS: ${ADMIN_IDS}
+      # Webhook (production) — раскомментировать после настройки SSL
+      WEBHOOK_URL: ${BOT_WEBHOOK_URL:-}   # если пусто — polling mode
+      BOT_WEBHOOK_SECRET: ${BOT_WEBHOOK_SECRET:-chesscoin_wh_secret}
+      BOT_PORT: 8080
+      # Premium-аватары: бот сохраняет загруженные файлы на ХОСТ (volume ниже),
+      # nginx отдаёт их по /static/avatars/ (см. location в nginx-конфиге).
+      AVATAR_STORAGE_DIR: /var/lib/chesscoin/avatars
+      PUBLIC_AVATAR_BASE_URL: https://${DOMAIN}/static/avatars
+    expose:
+      - "8080"
+    volumes:
+      # host-папка переживает пересборку контейнера и доступна nginx
+      - /opt/chesscoin/avatars:/var/lib/chesscoin/avatars
+    depends_on:
+      - backend
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          memory: 200M
+
+  # ─── Nginx ───────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: chesscoin_nginx
+    restart: always
+    # Порты 8081/8443 — так контейнер работает с 06.06.2026: TLS терминирует
+    # системный nginx на хосте (80/443) и проксирует сюда. В файле стояли 80/443,
+    # из-за чего `docker compose up -d nginx` падал на занятых портах и ломал
+    # деплой. Приведено к факту 27.09.2026.
+    ports:
+      - "8081:80"
+      - "8443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/chesscoin.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/certbot:/var/www/certbot:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
